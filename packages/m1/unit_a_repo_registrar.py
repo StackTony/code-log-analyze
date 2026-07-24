@@ -1,6 +1,7 @@
 """Unit A: Repo Registrar — clone/gitnexus analyze/候选池构建 + 安全 + 并发锁。"""
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import pathlib
@@ -13,12 +14,15 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from packages.contracts.enums import ACTION_FORCE_RELEASE_LOCK, ACTION_INGEST_REPO
+from packages.contracts.enums import ACTION_FORCE_RELEASE_LOCK, ACTION_INGEST_REPO, LANGUAGE_PYTHON
+from packages.contracts.log_point import LogPoint
 from packages.m1.gitnexus_client import GitNexusClient
 from packages.m1.storage.models import RepoIngestLockModel
 
 if TYPE_CHECKING:
     from packages.m1.audit_log import AuditLogger
+    from packages.m1.llm_hypothesis_generator import LLMHypothesisGenerator
+    from packages.m1.unit_b_log_point_finder import LogPointFinder
 
 # 路径越权防护
 _DOTDOT_PATTERN = re.compile(r"\.\.")
@@ -52,9 +56,15 @@ class RepoRegistrar:
         gitnexus: GitNexusClient,
         session: Session,
         audit: AuditLogger | None = None,
+        finder: LogPointFinder | None = None,
+        llm_generator: LLMHypothesisGenerator | None = None,
+        extractor_version: str = "1.0.0",
     ) -> None:
         self._gitnexus = gitnexus
         self._session = session
+        self._finder = finder
+        self._llm_gen = llm_generator
+        self._extractor_version = extractor_version
         # 避免循环 import：延迟 import
         from packages.m1.audit_log import AuditLogger
 
@@ -114,6 +124,35 @@ class RepoRegistrar:
             alias = repo_id
             repo_path = source.local_path or self._clone_url(source.url, repo_id)
             self._gitnexus.analyze(repo_path=repo_path, alias=alias)
+
+            # Unit B → C pipeline integration
+            if self._finder:
+                # 取当前 commit sha
+                try:
+                    sha = subprocess.run(
+                        ["git", "-C", repo_path, "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=True,
+                        encoding="utf-8", errors="replace",
+                    ).stdout.strip()
+                except Exception:
+                    sha = "unknown"
+
+                # 探测语言 — v1 只 python；C 由探测扩展
+                points = self._finder.find(
+                    repo_id=repo_id, repo_path=pathlib.Path(repo_path),
+                    language=LANGUAGE_PYTHON,
+                )
+                # 填 git_commit_sha
+                for p in points:
+                    p.git_commit_sha = sha
+
+                # 跑 LLM
+                if self._llm_gen:
+                    asyncio.run(self._llm_gen.generate(points))
+
+                # 持久化到候选池（Unit D 在 T11 接入）
+                self._stage_candidates(points)
+
             lock.status = "done"
             lock.finished_at = datetime.now(UTC)
         except Exception as e:
@@ -168,3 +207,8 @@ class RepoRegistrar:
                 actor=admin.id, action=ACTION_FORCE_RELEASE_LOCK,
                 target_repo_id=repo_id, extra={"admin": admin.id},
             )
+
+    def _stage_candidates(self, points: list[LogPoint]) -> None:
+        """占位：T11 实现 Unit D 候选池写入。"""
+        # 暂时不持久化，等 T11
+        pass
