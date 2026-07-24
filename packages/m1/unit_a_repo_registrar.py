@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from packages.m1.audit_log import AuditLogger
     from packages.m1.llm_hypothesis_generator import LLMHypothesisGenerator
     from packages.m1.unit_b_log_point_finder import LogPointFinder
+    from packages.m1.unit_d_candidate_staging import CandidateStager
 
 # 路径越权防护
 _DOTDOT_PATTERN = re.compile(r"\.\.")
@@ -59,12 +60,14 @@ class RepoRegistrar:
         finder: LogPointFinder | None = None,
         llm_generator: LLMHypothesisGenerator | None = None,
         extractor_version: str = "1.0.0",
+        stager: CandidateStager | None = None,
     ) -> None:
         self._gitnexus = gitnexus
         self._session = session
         self._finder = finder
         self._llm_gen = llm_generator
         self._extractor_version = extractor_version
+        self._stager = stager
         # 避免循环 import：延迟 import
         from packages.m1.audit_log import AuditLogger
 
@@ -209,6 +212,8 @@ class RepoRegistrar:
             )
 
     def _stage_candidates(self, points: list[LogPoint]) -> None:
-        """占位：T11 实现 Unit D 候选池写入。"""
-        # 暂时不持久化，等 T11
-        pass
+        """候选池写入（Unit D）。"""
+        if self._stager and points:
+            # repo_id 从第一个 point 取
+            repo_id = points[0].repo_id
+            self._stager.stage(repo_id, points)
