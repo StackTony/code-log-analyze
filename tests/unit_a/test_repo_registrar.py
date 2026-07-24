@@ -33,7 +33,7 @@ def db_session():
 def registrar(db_session: Session):
     gn_mock = MagicMock()
     gn_mock.analyze.return_value = None
-    return RepoRegistrar(gitnexus=gn_mock, session=db_session, git_user_email="bot@codefly")
+    return RepoRegistrar(gitnexus=gn_mock, session=db_session)
 
 
 def test_ingest_local_path_returns_repo_id(registrar: RepoRegistrar, tmp_path: pathlib.Path) -> None:
@@ -125,3 +125,26 @@ def test_force_release_lock_admin_only(registrar: RepoRegistrar, db_session: Ses
     registrar.force_release_lock("repo-x", User(id="admin", name="root", is_admin=True))
     lock = db_session.scalar(select(RepoIngestLockModel).where(RepoIngestLockModel.repo_id == "repo-x").order_by(RepoIngestLockModel.id.desc()))
     assert lock.status == "failed"  # 强制释放 = 标记 failed
+
+
+def test_incremental_not_implemented(registrar: RepoRegistrar, tmp_path: pathlib.Path) -> None:
+    """AC-20: incremental=True 在 F001 v1 raise NotImplementedError。"""
+    source = RepoSource(local_path=str(tmp_path))
+    with pytest.raises(NotImplementedError, match="incremental mode"):
+        registrar.ingest(source, User(id="user-1", name="alice"), incremental=True)
+
+
+def test_ingest_failure_updates_lock_to_failed(
+    registrar: RepoRegistrar, tmp_path: pathlib.Path, db_session: Session
+) -> None:
+    """gitnexus.analyze 抛异常时 lock → failed + error_msg 记录。"""
+    source = RepoSource(local_path=str(tmp_path))
+    registrar._gitnexus.analyze.side_effect = RuntimeError("gitnexus error")
+    with pytest.raises(RuntimeError, match="gitnexus error"):
+        registrar.ingest(source, User(id="user-1", name="alice"))
+    lock = db_session.scalar(
+        select(RepoIngestLockModel).order_by(RepoIngestLockModel.id.desc())
+    )
+    assert lock is not None
+    assert lock.status == "failed"
+    assert "gitnexus error" in (lock.error_msg or "")

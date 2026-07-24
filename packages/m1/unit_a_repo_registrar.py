@@ -6,6 +6,7 @@ import hashlib
 import pathlib
 import re
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -50,12 +51,10 @@ class RepoRegistrar:
         self,
         gitnexus: GitNexusClient,
         session: Session,
-        git_user_email: str = "bot@codefly",
         audit: AuditLogger | None = None,
     ) -> None:
         self._gitnexus = gitnexus
         self._session = session
-        self._git_email = git_user_email
         # 避免循环 import：延迟 import
         from packages.m1.audit_log import AuditLogger
 
@@ -73,6 +72,9 @@ class RepoRegistrar:
         elif source.local_path:
             if _DOTDOT_PATTERN.search(source.local_path):
                 raise UnsafePathError(f"路径含 .. 被拒绝: {source.local_path}")
+            p = pathlib.Path(source.local_path)
+            if not p.exists():
+                raise UnsafePathError(f"local_path 不存在: {source.local_path}")
         else:
             raise ValueError("RepoSource 必须有 url 或 local_path")
 
@@ -130,12 +132,23 @@ class RepoRegistrar:
 
     def _clone_url(self, url: str, repo_id: str) -> str:
         """clone 远程仓到临时工作目录。"""
-        work_dir = pathlib.Path("/tmp/codefly-repos") / repo_id
+        work_dir = pathlib.Path(tempfile.gettempdir()) / "codefly-repos" / repo_id
         work_dir.parent.mkdir(parents=True, exist_ok=True)
-        if work_dir.exists():
-            subprocess.run(["git", "-C", str(work_dir), "pull", "--ff-only"], check=True)
-        else:
-            subprocess.run(["git", "clone", url, str(work_dir)], check=True)
+        try:
+            if work_dir.exists():
+                result = subprocess.run(
+                    ["git", "-C", str(work_dir), "pull", "--ff-only"],
+                    capture_output=True, text=True, check=False, encoding="utf-8", errors="replace",
+                )
+            else:
+                result = subprocess.run(
+                    ["git", "clone", url, str(work_dir)],
+                    capture_output=True, text=True, check=False, encoding="utf-8", errors="replace",
+                )
+            if result.returncode != 0:
+                raise RuntimeError(f"git operation failed for {repo_id}: {result.stderr}")
+        except FileNotFoundError as e:
+            raise RuntimeError(f"git binary not found: {e}") from e
         return str(work_dir)
 
     def force_release_lock(self, repo_id: str, admin: User) -> None:
