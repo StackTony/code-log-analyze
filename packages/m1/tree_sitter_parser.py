@@ -109,7 +109,8 @@ class TreeSitterParser:
                     walk(child)
                 current_fn[0] = prev_fn
                 return
-            if node.type == "call":
+            # Python: "call", C: "call_expression"
+            if node.type in ("call", "call_expression"):
                 # callee 可能是 identifier 或 attribute (LOG.info)
                 callee_node = node.child_by_field_name("function")
                 if callee_node:
