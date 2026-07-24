@@ -1,0 +1,84 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== Virtual envs =====
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# ===== Testing =====
+.pytest_cache/
+.cache
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+htmlcov/
+coverage.xml
+*.cover
+coverage_html_report/
+
+# ===== Linting =====
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Project: configs & secrets =====
+# Config loading order: env (CODEFLY_*) > config.local.yaml (gitignored) > config.yaml (tracked)
+config.local.yaml
+.env
+.env.*
+!.env.example
+
+# ===== Project: runtime artifacts =====
+# Stray runtime log samples (e.g. qemu logs dropped by external runtime sessions)
+tests/instance-*.log
+tests/**/instance-*.log
+
+# ===== DB / migrations local state =====
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
