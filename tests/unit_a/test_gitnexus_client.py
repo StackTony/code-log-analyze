@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from packages.m1.gitnexus_client import GitNexusClient
 
 
@@ -35,11 +37,14 @@ def test_cypher_parses_markdown_table_to_dicts() -> None:
 
 def test_list_repos_returns_alias_list() -> None:
     client = GitNexusClient()
-    fake_output = "\nIndexed Repositories (1)\n\n  GenericAgent\n    Path: ...\n"
+    fake_output = "\nIndexed Repositories (1)\n\n  GenericAgent\n    Path: /path/to/repo\n    Indexed: 2024-01-01\n"
     with patch("subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout=fake_output, stderr="")
         repos = client.list_repos()
-        assert "GenericAgent" in repos
+        assert isinstance(repos, list)
+        assert len(repos) >= 1
+        assert repos[0]["alias"] == "GenericAgent"
+        assert "path" in repos[0]
 
 
 def test_context_returns_symbol_info() -> None:
@@ -54,3 +59,25 @@ def test_context_returns_symbol_info() -> None:
         result = client.context(symbol_name="login", repo_alias="r")
         assert result["name"] == "login"
         assert result["filePath"] == "src/app.py"
+
+
+def test_analyze_raises_on_nonzero_returncode() -> None:
+    """GitNexusError 在 CLI 非 0 退出时抛出。"""
+    from packages.m1.gitnexus_client import GitNexusError
+
+    client = GitNexusClient()
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="repo not found")
+        with pytest.raises(GitNexusError, match="analyze"):
+            client.analyze(repo_path="/tmp", alias="test")
+
+
+def test_cypher_raises_on_invalid_json() -> None:
+    """cypher 非 JSON 输出时抛 GitNexusError。"""
+    from packages.m1.gitnexus_client import GitNexusError
+
+    client = GitNexusClient()
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="not json", stderr="")
+        with pytest.raises(GitNexusError, match="not JSON"):
+            client.cypher("MATCH (a) RETURN a")
