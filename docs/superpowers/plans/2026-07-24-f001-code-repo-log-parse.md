@@ -858,8 +858,8 @@ class LogPoint:
     occurrence_count: int = 0
     is_top_n: bool = False
     ingestion_status: str = "candidate"  # STATUS_* 常量
-    first_seen_at: datetime | None = None
-    last_seen_at: datetime | None = None
+    first_seen_at: datetime  # 必填，候选池写入时设值（云长 MF-1 修复）
+    last_seen_at: datetime  # 必填，候选池写入时设值（云长 MF-1 修复）
 
 
 @dataclass
@@ -1128,14 +1128,41 @@ class LogPointModel(Base):
 
 
 class CandidateStagingModel(Base):
-    """候选池 — 不进主表，用户 confirm 后才入 log_point。"""
+    """候选池 — 不进主表，用户 confirm 后才入 log_point。
+
+    云长 MF-4 修复：候选池必须存完整 LogPoint 字段，否则 list_candidates()
+    返回假数据，用户筛选 UI 看不到真实日志内容无法做决策（违反 C-5）。
+    方案 A：字段级可查询、可索引、可过滤，比 JSON blob 更适合企业内部平台。
+    """
     __tablename__ = "candidate_staging"
 
+    # 主键 + 仓维度索引
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     repo_id: Mapped[str] = mapped_column(String(64), index=True)
-    log_point_id: Mapped[str] = mapped_column(String(64), index=True)  # 候选阶段就分配 UUID
+
+    # 完整 LogPoint 字段（与 LogPointModel 对齐，confirm 时复制到主表）
+    git_commit_sha: Mapped[str] = mapped_column(String(64))
+    extractor_version: Mapped[str] = mapped_column(String(16))
+    file_path: Mapped[str] = mapped_column(String(512), index=True)
+    function_signature: Mapped[str] = mapped_column(String(512))
+    line_start: Mapped[int] = mapped_column(Integer)
+    line_end: Mapped[int] = mapped_column(Integer)
+    language: Mapped[str] = mapped_column(String(16))
+    log_level: Mapped[str] = mapped_column(String(16))
+    log_message_template: Mapped[str] = mapped_column(Text)
+    log_message_variables_json: Mapped[str] = mapped_column(Text, default="[]")
+    framework_hint: Mapped[str] = mapped_column(String(32))
+    confidence_score: Mapped[float] = mapped_column(Float)
+    enclosing_class: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    call_chain_to_entry_json: Mapped[str] = mapped_column(Text, default="[]")
+    enclosing_community: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    llm_hypothesis_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 频次 + 状态
     occurrence_count: Mapped[int] = mapped_column(Integer, default=0)
     is_top_n: Mapped[bool] = mapped_column(default=False)
+    ingestion_status: Mapped[str] = mapped_column(String(16), default="candidate")
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -3328,7 +3355,11 @@ def test_is_top_n_marked_for_high_freq(session: Session) -> None:
 
 
 def test_list_candidates_default_only_top_n(session: Session) -> None:
-    """AC-10：默认只返回 is_top_n=True。"""
+    """AC-10：默认只返回 is_top_n=True。
+
+    云长 MF-4 修复后加强断言：返回的 LogPoint 含真实字段（file_path/function_signature
+    等非空），不再是假数据。验证用户筛选 UI 能看到真实日志内容。
+    """
     stager = CandidateStager(session=session, audit=AuditLogger(session), top_n=2)
     points = [
         _make_lp("lp-1", "msg A", count=10),
@@ -3341,9 +3372,36 @@ def test_list_candidates_default_only_top_n(session: Session) -> None:
     result = stager.list_candidates("repo-1", CandidateFilter(include_all=False))
     assert {p.id for p in result} == {"lp-1", "lp-2"}
 
+    # MF-4：返回的 LogPoint 含真实字段（不是空字符串）
+    for p in result:
+        assert p.file_path  # 非空
+        assert p.function_signature  # 非空
+        assert p.log_message_template  # 非空
+        assert p.language  # 非空
+        # first_seen_at / last_seen_at 必填（MF-1）
+        assert p.first_seen_at is not None
+        assert p.last_seen_at is not None
+
     # include_all=True 看全部
     result_all = stager.list_candidates("repo-1", CandidateFilter(include_all=True))
     assert len(result_all) == 3
+
+
+def test_confirm_ingestion_preserves_full_fields(session: Session) -> None:
+    """MF-4 修复后：confirm 后主表记录含完整字段（从候选池复制）。"""
+    stager = CandidateStager(session=session, audit=AuditLogger(session), top_n=50)
+    points = [_make_lp("lp-1", "msg A", count=5)]
+    stager.stage("repo-1", points)
+
+    stager.confirm_ingestion("repo-1", ["lp-1"], confirmer="user-1")
+
+    main_lp = session.scalar(select(LogPointModel).where(LogPointModel.id == "lp-1"))
+    assert main_lp is not None
+    assert main_lp.ingestion_status == STATUS_CONFIRMED
+    # MF-4：主表记录含真实字段（不是假数据 "staged" / 空字符串）
+    assert main_lp.file_path  # 非空
+    assert main_lp.function_signature  # 非空
+    assert main_lp.log_message_template == "msg A"
 
 
 def test_confirm_ingestion_moves_to_main(session: Session) -> None:
@@ -3370,7 +3428,13 @@ def test_query_log_points_returns_only_ingested(session: Session) -> None:
 
 
 def test_revoke_ingestion_back_to_candidate(session: Session) -> None:
-    """AC-9：revoke 从 ingested 退回 candidate。"""
+    """AC-9：revoke 从 ingested 退回 candidate。
+
+    云长 MF-2 修复后断言加强：
+    - 主表记录**保留**（不删，符合 P0 持久化铁律）
+    - ingestion_status 回退到 candidate
+    - query_log_points 不再返回这条（AC-13 只返回 confirmed/ingested）
+    """
     stager = CandidateStager(session=session, audit=AuditLogger(session), top_n=50)
     points = [_make_lp("lp-1", "msg A", count=5)]
     stager.stage("repo-1", points)
@@ -3378,10 +3442,16 @@ def test_revoke_ingestion_back_to_candidate(session: Session) -> None:
 
     stager.revoke_ingestion("repo-1", ["lp-1"], revoker="user-1")
 
+    # 主表记录保留，状态回 candidate
     main_lp = session.scalar(select(LogPointModel).where(LogPointModel.id == "lp-1"))
-    assert main_lp is None or main_lp.ingestion_status == STATUS_CANDIDATE
+    assert main_lp is not None  # MF-2: 不删除
+    assert main_lp.ingestion_status == STATUS_CANDIDATE
+    # 候选池记录也保留（last_seen_at 刷新）
     cand = session.scalar(select(CandidateStagingModel).where(CandidateStagingModel.id == "lp-1"))
     assert cand is not None
+    # query_log_points 不再返回（AC-13）
+    result = stager.query_log_points("repo-1", LogPointFilter())
+    assert all(p.id != "lp-1" for p in result)
 
 
 def test_ttl_cleanup_removes_old_candidates(session: Session) -> None:
@@ -3446,7 +3516,7 @@ from packages.contracts.enums import (
     STATUS_CONFIRMED,
     STATUS_INGESTED,
 )
-from packages.contracts.log_point import LogPoint, LLMHypothesis
+from packages.contracts.log_point import CaseRef, LogPoint, LLMHypothesis
 from packages.m1.audit_log import AuditLogger
 from packages.m1.storage.models import CandidateStagingModel, LogPointModel
 
@@ -3475,27 +3545,57 @@ class CandidateStager:
         self._top_n = top_n
 
     def stage(self, repo_id: str, points: list[LogPoint]) -> None:
-        """候选池写入（不入主表）。"""
+        """候选池写入（不入主表）。
+
+        云长 MF-4 修复：候选池存储完整 LogPoint 字段（与 LogPointModel 对齐），
+        用户筛选 UI 能看到真实文件路径/函数签名/日志内容（C-5 要求）。
+        """
         # 排序找 top_n
         sorted_points = sorted(points, key=lambda p: p.occurrence_count, reverse=True)
         top_ids = {p.id for p in sorted_points[: self._top_n]}
 
+        now = datetime.now(timezone.utc)
         for p in points:
             p.is_top_n = p.id in top_ids
             p.ingestion_status = STATUS_CANDIDATE
+            # MF-1：first_seen_at/last_seen_at 必填，候选池写入时设值
+            if p.first_seen_at is None:
+                p.first_seen_at = now
+            if p.last_seen_at is None:
+                p.last_seen_at = now
 
             staging = CandidateStagingModel(
-                id=p.id, repo_id=repo_id, log_point_id=p.id,
+                id=p.id, repo_id=repo_id,
+                # 完整 LogPoint 字段（MF-4）
+                git_commit_sha=p.git_commit_sha,
+                extractor_version=p.extractor_version,
+                file_path=p.file_path,
+                function_signature=p.function_signature,
+                line_start=p.line_start,
+                line_end=p.line_end,
+                language=p.language,
+                log_level=p.log_level,
+                log_message_template=p.log_message_template,
+                log_message_variables_json=json.dumps(p.log_message_variables),
+                framework_hint=p.framework_hint,
+                confidence_score=p.confidence_score,
+                enclosing_class=p.enclosing_class,
+                call_chain_to_entry_json=json.dumps(p.call_chain_to_entry),
+                enclosing_community=p.enclosing_community,
+                evidence_refs_json=json.dumps([_caseref_to_dict(c) for c in p.evidence_refs]),
+                llm_hypothesis_json=_llm_hyp_to_json(p.llm_hypothesis),
+                # 频次 + 状态
                 occurrence_count=p.occurrence_count,
                 is_top_n=p.is_top_n,
-                first_seen_at=p.first_seen_at or datetime.now(timezone.utc),
-                last_seen_at=p.last_seen_at or datetime.now(timezone.utc),
+                ingestion_status=STATUS_CANDIDATE,
+                first_seen_at=p.first_seen_at,
+                last_seen_at=p.last_seen_at,
             )
             self._session.add(staging)
         self._session.commit()
 
     def list_candidates(self, repo_id: str, filter: CandidateFilter) -> list[LogPoint]:
-        """AC-10：默认 is_top_n=True。"""
+        """AC-10：默认 is_top_n=True。返回完整 LogPoint（MF-4 修复后含真实字段）。"""
         stmt = select(CandidateStagingModel).where(CandidateStagingModel.repo_id == repo_id)
         if not filter.include_all:
             stmt = stmt.where(CandidateStagingModel.is_top_n.is_(True))
@@ -3506,25 +3606,36 @@ class CandidateStager:
     def confirm_ingestion(
         self, repo_id: str, log_point_ids: list[str], confirmer: str
     ) -> None:
-        """AC-11：用户显式勾选后才入主表。"""
+        """AC-11：用户显式勾选后才入主表。
+
+        MF-4 修复：从候选池复制完整 LogPoint 字段到主表（不再用假数据）。
+        """
         for lp_id in log_point_ids:
             staging = self._session.scalar(
                 select(CandidateStagingModel).where(CandidateStagingModel.id == lp_id)
             )
             if not staging:
                 continue
-            # 写入主表
+            # 从候选池复制完整字段到主表
             main_lp = LogPointModel(
                 id=staging.id, repo_id=repo_id,
-                git_commit_sha="unknown", extractor_version="1.0.0",
-                file_path="staged", function_signature="",
-                line_start=staging.id.__hash__() % 1000,  # 实际由 stage 写
-                line_end=0, language="python", log_level="INFO",
-                log_message_template="", log_message_variables=[],
-                framework_hint="staged", confidence_score=0.0,
-                enclosing_class=None, call_chain_to_entry=[],
-                enclosing_community=None, evidence_refs_json="[]",
-                llm_hypothesis_json=None,
+                git_commit_sha=staging.git_commit_sha,
+                extractor_version=staging.extractor_version,
+                file_path=staging.file_path,
+                function_signature=staging.function_signature,
+                line_start=staging.line_start,
+                line_end=staging.line_end,
+                language=staging.language,
+                log_level=staging.log_level,
+                log_message_template=staging.log_message_template,
+                log_message_variables_json=staging.log_message_variables_json,
+                framework_hint=staging.framework_hint,
+                confidence_score=staging.confidence_score,
+                enclosing_class=staging.enclosing_class,
+                call_chain_to_entry_json=staging.call_chain_to_entry_json,
+                enclosing_community=staging.enclosing_community,
+                evidence_refs_json=staging.evidence_refs_json,
+                llm_hypothesis_json=staging.llm_hypothesis_json,
                 occurrence_count=staging.occurrence_count,
                 is_top_n=staging.is_top_n,
                 ingestion_status=STATUS_CONFIRMED,
@@ -3541,16 +3652,29 @@ class CandidateStager:
     def revoke_ingestion(
         self, repo_id: str, log_point_ids: list[str], revoker: str
     ) -> None:
-        """AC-9：从主表退回候选池。"""
+        """AC-9：从主表退回候选池。
+
+        云长 MF-2 修复：不删主表记录（违反 P0 持久化铁律——删除 ≠ 退回），
+        改为状态机回退 ingestion_status: ingested/confirmed → candidate。
+        保留主表记录，用户可追溯历史；query_log_points 自动过滤 candidate 状态
+        （AC-13 只返回 confirmed/ingested）。
+
+        同时刷新候选池记录的 last_seen_at，让候选 UI 重新展示这条候选。
+        """
         for lp_id in log_point_ids:
             main_lp = self._session.scalar(
                 select(LogPointModel).where(LogPointModel.id == lp_id)
             )
             if main_lp:
-                # 状态回 candidate
+                # 状态回退，不删记录
                 main_lp.ingestion_status = STATUS_CANDIDATE
-                # 注意：简化版直接物理删主表，回候选池（真实场景要保留 staging）
-                self._session.delete(main_lp)
+                main_lp.last_seen_at = datetime.now(timezone.utc)
+                # 同步刷新候选池（如果候选池还有记录的话）
+                staging = self._session.scalar(
+                    select(CandidateStagingModel).where(CandidateStagingModel.id == lp_id)
+                )
+                if staging:
+                    staging.last_seen_at = main_lp.last_seen_at
         self._session.commit()
         self._audit.log(
             actor=revoker, action=ACTION_REVOKE_INGESTION,
@@ -3574,12 +3698,17 @@ class CandidateStager:
         return [self._model_to_log_point(r) for r in rows]
 
     def cleanup_expired(self, ttl_days: int = 30) -> int:
-        """spec Risk：candidate TTL 清理。"""
+        """spec Risk：candidate TTL 清理。
+
+        只删 candidate 状态的（主表已 confirmed/ingested 不动）。
+        云长 SF-4 修复方向：触发机制待定（cron / 惰性 / worker），
+        v1 实现由 ingest_repo 完成后顺带调用——见 plan T14 service 层。
+        """
         cutoff = datetime.now(timezone.utc) - timedelta(days=ttl_days)
-        # 只删 candidate 状态的（主表已 confirmed/ingested 不动）
         to_delete = self._session.scalars(
             select(CandidateStagingModel)
             .where(CandidateStagingModel.last_seen_at < cutoff)
+            .where(CandidateStagingModel.ingestion_status == STATUS_CANDIDATE)
         ).all()
         for r in to_delete:
             self._session.delete(r)
@@ -3587,17 +3716,26 @@ class CandidateStager:
         return len(to_delete)
 
     def _staging_to_log_point(self, r: CandidateStagingModel) -> LogPoint:
-        # 简化：staging 不含完整 LogPoint 字段，返回部分填充的 LogPoint
+        """MF-4 修复：从候选池完整字段重建 LogPoint（不再返回假数据）。"""
         return LogPoint(
-            id=r.id, repo_id=r.repo_id, git_commit_sha="",
-            extractor_version="", file_path="", function_signature="",
-            line_start=0, line_end=0, language="", log_level="",
-            log_message_template="", log_message_variables=[],
-            framework_hint="", confidence_score=0.0,
-            enclosing_class=None, call_chain_to_entry=[], enclosing_community=None,
-            evidence_refs=[], llm_hypothesis=None,
+            id=r.id, repo_id=r.repo_id,
+            git_commit_sha=r.git_commit_sha,
+            extractor_version=r.extractor_version,
+            file_path=r.file_path,
+            function_signature=r.function_signature,
+            line_start=r.line_start, line_end=r.line_end,
+            language=r.language, log_level=r.log_level,
+            log_message_template=r.log_message_template,
+            log_message_variables=json.loads(r.log_message_variables_json),
+            framework_hint=r.framework_hint,
+            confidence_score=r.confidence_score,
+            enclosing_class=r.enclosing_class,
+            call_chain_to_entry=json.loads(r.call_chain_to_entry_json),
+            enclosing_community=r.enclosing_community,
+            evidence_refs=[_dict_to_caseref(d) for d in json.loads(r.evidence_refs_json)],
+            llm_hypothesis=_json_to_llm_hyp(r.llm_hypothesis_json),
             occurrence_count=r.occurrence_count, is_top_n=r.is_top_n,
-            ingestion_status=STATUS_CANDIDATE,
+            ingestion_status=r.ingestion_status,
             first_seen_at=r.first_seen_at, last_seen_at=r.last_seen_at,
         )
 
@@ -3617,12 +3755,58 @@ class CandidateStager:
             ingestion_status=r.ingestion_status,
             first_seen_at=r.first_seen_at, last_seen_at=r.last_seen_at,
         )
+
+
+# --- MF-4 修复辅助函数：CaseRef/LLMHypothesis 序列化反序列化 ---
+# 候选池表用 JSON 字段存 evidence_refs 和 llm_hypothesis，需要 ↔ dataclass 转换
+
+def _caseref_to_dict(c: CaseRef) -> dict:
+    return {
+        "case_id": c.case_id, "repo_id": c.repo_id,
+        "file_path": c.file_path, "function_signature": c.function_signature,
+        "log_template": c.log_template, "resolved_at": c.resolved_at.isoformat(),
+        "resolution_summary": c.resolution_summary, "resolution_diff_url": c.resolution_diff_url,
+    }
+
+
+def _dict_to_caseref(d: dict) -> CaseRef:
+    return CaseRef(
+        case_id=d["case_id"], repo_id=d["repo_id"],
+        file_path=d["file_path"], function_signature=d["function_signature"],
+        log_template=d["log_template"],
+        resolved_at=datetime.fromisoformat(d["resolved_at"]),
+        resolution_summary=d["resolution_summary"],
+        resolution_diff_url=d.get("resolution_diff_url"),
+    )
+
+
+def _llm_hyp_to_json(hyp: LLMHypothesis | None) -> str | None:
+    if hyp is None:
+        return None
+    return json.dumps({
+        "summary": hyp.summary, "possible_causes": hyp.possible_causes,
+        "error_kind": hyp.error_kind, "suggested_check": hyp.suggested_check,
+        "model_name": hyp.model_name, "prompt_hash": hyp.prompt_hash,
+        "generated_at": hyp.generated_at.isoformat(),
+    })
+
+
+def _json_to_llm_hyp(s: str | None) -> LLMHypothesis | None:
+    if not s:
+        return None
+    d = json.loads(s)
+    return LLMHypothesis(
+        summary=d["summary"], possible_causes=d["possible_causes"],
+        error_kind=d["error_kind"], suggested_check=d.get("suggested_check"),
+        model_name=d["model_name"], prompt_hash=d["prompt_hash"],
+        generated_at=datetime.fromisoformat(d["generated_at"]),
+    )
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/unit_d/test_candidate_staging.py -v`
-Expected: PASS (8 tests)
+Expected: PASS (9 tests)  # MF-4 后多了一个 test_confirm_ingestion_preserves_full_fields
 
 - [ ] **Step 5: Lint check**
 
