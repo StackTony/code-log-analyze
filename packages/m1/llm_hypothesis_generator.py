@@ -83,9 +83,10 @@ class LLMHypothesisGenerator:
         # AC-8：脱敏
         prompt = self._build_prompt(lp)
         sanitized, hits = self._sanitizer.sanitize(prompt)
+        # 不论 hits 是否为 0，都用 sanitized 调 LLM（hits=0 时 sanitized == prompt）
         if sum(hits.values()) > 0:
-            # 仍允许调 LLM（已脱敏），但记录审计
-            prompt = sanitized
+            # 已脱敏，仍调 LLM（合规）
+            pass
 
         # 调 LLM（带重试）
         for attempt in range(self._max_retries):

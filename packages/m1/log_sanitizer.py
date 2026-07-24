@@ -6,7 +6,7 @@ import re
 
 # 敏感数据正则库
 _PATTERNS: dict[str, str] = {
-    "api_key": r"(api[_-]?key[\"']?\s*[:=]\s*[\"']?)([A-Za-z0-9\-_]+)",
+    "api_key": r"(api[_-]?key[\"']?\s*[:=]\s*[\"']?)([A-Za-z0-9\-_]{16,})",
     "password": r"(password[\"']?\s*[:=]\s*[\"']?)([^\s\"']+)",
     "token": r"(token[\"']?\s*[:=]\s*[\"']?)([A-Za-z0-9\-_\.]{20,})",
     "ipv4": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
