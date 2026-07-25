@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Generator
 
 import pytest
+from prometheus_client import start_http_server
 from prometheus_client.core import REGISTRY as DEFAULT_REGISTRY
 
 # 在导入 deps 模块前设置测试用的 postgres_dsn
@@ -37,6 +40,44 @@ def reset_prometheus_registry() -> None:
     _reset_prometheus_registry()  # Clear before test
     yield
     _reset_prometheus_registry()  # Clear after test
+
+
+@pytest.fixture()
+def metrics_server() -> Generator[str, None, None]:
+    """独立 metrics server fixture（9101 端口，避免与 app lifespan 9100 冲突 — 云长 OQ-2）。
+
+    注：Windows 需要使用 spawn context 且非 daemon 模式启动 prometheus HTTP server。
+    """
+    import multiprocessing
+
+    import httpx
+
+    # Use spawn context for Windows compatibility
+    ctx = multiprocessing.get_context("spawn")
+    proc = ctx.Process(target=start_http_server, args=(9101,))
+    proc.start()
+
+    # Poll until server is ready (Windows spawn takes time)
+    url = "http://localhost:9101"
+    max_wait = 5.0
+    interval = 0.3
+    elapsed = 0.0
+    while elapsed < max_wait:
+        try:
+            r = httpx.get(f"{url}/", timeout=1.0)
+            if r.status_code == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(interval)
+        elapsed += interval
+
+    yield url
+
+    # Cleanup
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=3)
 
 
 # Hook to reset between fixture setup and test execution
