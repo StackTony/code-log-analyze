@@ -5,5 +5,11 @@ line-length = 100
 select = ["E", "F", "W", "I", "B", "UP", "RUF"]
 ignore = ["E501", "RUF001", "RUF002", "RUF003"]  # 行长由 formatter 管；中文全角符号允许
 
+[lint.per-file-ignores]
+# M1 iron law: immutable. T13 added per-file W292 ignore so the missing trailing
+# newline in M1's __init__.py doesn't block lint without modifying M1 source.
+"packages/m1/__init__.py" = ["W292"]
+"tests/unit_b/__init__.py" = ["W292"]
+
 [lint.isort]
 known-first-party = ["packages"]
