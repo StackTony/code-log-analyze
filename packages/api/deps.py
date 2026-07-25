@@ -34,6 +34,17 @@ _dsn = _config.storage.postgres_dsn
 _engine = create_engine(_dsn, pool_pre_ping=True) if _dsn and not _dsn.startswith('${') else None
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False) if _engine else None
 
+# Module-level singleton emitter — constructed once per worker, reused across requests.
+_metrics_emitter: MetricsEmitter | None = None
+
+
+def _get_metrics_emitter() -> MetricsEmitter:
+    """Get or create the singleton MetricsEmitter instance."""
+    global _metrics_emitter
+    if _metrics_emitter is None:
+        _metrics_emitter = MetricsEmitter()
+    return _metrics_emitter
+
 
 def get_session() -> Generator[Session, None, None]:
     """FastAPI Depends — per-request session（云长 I-1 修订）。"""
@@ -46,7 +57,7 @@ def get_session() -> Generator[Session, None, None]:
         session.close()
 
 
-def get_service(session: Session = Depends(get_session)) -> Generator[RepoLogGraphService, None, None]:  # type: ignore[assignment]
+def get_service(session: Session = Depends(get_session)) -> Generator[RepoLogGraphService, None, None]:  # type: ignore[assignment]  # noqa: B008 — FastAPI Depends pattern
     """FastAPI Depends — 构造 RepoLogGraphService。"""
     # 复用 M1 service 构造逻辑（参考 tests/e2e/test_repo_log_graph_service.py fixture）
     from unittest.mock import AsyncMock, MagicMock
@@ -81,7 +92,7 @@ def get_service(session: Session = Depends(get_session)) -> Generator[RepoLogGra
     service = RepoLogGraphService(
         session=session, gitnexus=gn, llm_client=llm, cache=cache, config=_config,
         tree_sitter=TreeSitterParser(), audit=AuditLogger(session),
-        metrics=MetricsEmitter(),
+        metrics=_get_metrics_emitter(),
     )
     try:
         yield service

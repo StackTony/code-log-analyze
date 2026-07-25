@@ -25,7 +25,7 @@ AC_COVERAGE = {
     "AC-18": "tests/metrics/test_metrics_emitter.py::test_candidate_pool_size_metric",
     "AC-19": "tests/contracts/test_log_point.py::test_log_point_roundtrip",
     "AC-20": "tests/unit_a/test_repo_registrar.py::test_incremental_not_implemented",
-    "AC-21": "(实施完成后由 @云长 跨家族 review - 流程项，不在测试覆盖)",  # noqa: RUF001
+    "AC-21": "(实施完成后由 @云长 跨家族 review - 流程项，不在测试覆盖)",
 }
 
 

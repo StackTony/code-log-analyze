@@ -3,7 +3,7 @@ line-length = 100
 
 [lint]
 select = ["E", "F", "W", "I", "B", "UP", "RUF"]
-ignore = ["E501", "RUF002", "RUF003"]  # 行长由 formatter 管；中文全角符号允许
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]  # 行长由 formatter 管；中文全角符号允许
 
 [lint.isort]
 known-first-party = ["packages"]

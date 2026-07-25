@@ -15,7 +15,7 @@ os.environ.setdefault("CODEFLY_PG_DSN", "sqlite:///:memory:")
 
 
 def _reset_prometheus_registry() -> None:
-    """Unregister all m1_* collectors from prometheus REGISTRY."""
+    """Unregister all m1_* collectors from prometheus REGISTRY and reset singleton."""
     # Find all m1 collectors (those that have at least one name starting with 'm1_')
     m1_collectors = [
         collector
@@ -25,6 +25,10 @@ def _reset_prometheus_registry() -> None:
     # Unregister them
     for collector in m1_collectors:
         DEFAULT_REGISTRY.unregister(collector)
+    # Also reset the singleton MetricsEmitter in deps module so it will be reconstructed
+    # on the next request (after registry is cleared)
+    import packages.api.deps as deps_mod
+    deps_mod._metrics_emitter = None
 
 
 @pytest.fixture(autouse=True)

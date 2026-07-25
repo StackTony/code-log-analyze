@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     """启动 metrics server 独立进程 + console 警告（spec §六 + AC-7 + AC-10 + AC-11）。"""
     # AC-7：未启用认证警告
     if not _config.api.enable_auth:
-        logger.warning("⚠️  未启用认证，dev-only 模式 — 禁止暴露公网")  # noqa: RUF001
+        logger.warning("⚠️  未启用认证，dev-only 模式 — 禁止暴露公网")
 
     # AC-10：metrics server 独立进程（multiprocessing.Process，避免 --reload 丢累积值）
     metrics_process: multiprocessing.Process | None = None
