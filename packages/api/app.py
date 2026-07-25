@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import start_http_server
 
+from packages.api.error_handlers import register_exception_handlers
 from packages.api.routes.ops import router as ops_router
 from packages.m1.config_loader import load_config
 
@@ -67,3 +68,6 @@ app.add_middleware(
 
 # 路由聚合（其他 routes 在后续 task 加）
 app.include_router(ops_router, tags=["ops"])
+
+# 统一异常处理器（spec §五 + AC-5）
+register_exception_handlers(app)
