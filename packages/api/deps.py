@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
+from fastapi import Depends
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -45,7 +46,7 @@ def get_session() -> Generator[Session, None, None]:
         session.close()
 
 
-def get_service(session: Session = next(get_session())) -> Generator[RepoLogGraphService, None, None]:  # noqa: B008 — brief specifies this signature verbatim
+def get_service(session: Session = Depends(get_session)) -> Generator[RepoLogGraphService, None, None]:  # type: ignore[assignment]
     """FastAPI Depends — 构造 RepoLogGraphService。"""
     # 复用 M1 service 构造逻辑（参考 tests/e2e/test_repo_log_graph_service.py fixture）
     from unittest.mock import AsyncMock, MagicMock

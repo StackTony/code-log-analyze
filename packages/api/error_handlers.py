@@ -75,6 +75,17 @@ def register_exception_handlers(app: FastAPI) -> None:
             ).model_dump(),
         )
 
+    @app.exception_handler(ValueError)
+    async def handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content=ErrorResponse(
+                code="GENERIC_VALIDATION_ERROR",
+                message=str(exc),
+                details={},
+            ).model_dump(),
+        )
+
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(
