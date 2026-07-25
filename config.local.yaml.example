@@ -1,0 +1,9 @@
+# 复制本文件为 config.local.yaml 后填入真实值
+llm:
+  api_key: sk-xxx  # 或 export CODEFLY_LLM_API_KEY=sk-xxx
+  model_name: gpt-4
+  endpoint: https://api.openai.com/v1
+storage:
+  postgres_dsn: postgresql://user:pass@localhost:5432/codefly
+  redis_port: 6398
+  redis_namespace: codefly-m1-dev
