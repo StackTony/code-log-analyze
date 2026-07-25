@@ -22,21 +22,30 @@ def test_llm_hypothesis_schema_matches_dataclass() -> None:
     """LLMHypothesisAPI 字段与 LLMHypothesis dataclass 完全一致。"""
     dataclass_fields = {f.name for f in dataclasses.fields(LLMHypothesis)}
     schema_fields = set(LLMHypothesisAPI.model_fields.keys())
-    assert dataclass_fields == schema_fields
+    assert dataclass_fields == schema_fields, (
+        f"dataclass: {dataclass_fields - schema_fields}; "
+        f"schema: {schema_fields - dataclass_fields}"
+    )
 
 
 def test_caseref_schema_matches_dataclass() -> None:
     """CaseRefAPI 字段与 CaseRef dataclass 完全一致。"""
     dataclass_fields = {f.name for f in dataclasses.fields(CaseRef)}
     schema_fields = set(CaseRefAPI.model_fields.keys())
-    assert dataclass_fields == schema_fields
+    assert dataclass_fields == schema_fields, (
+        f"dataclass: {dataclass_fields - schema_fields}; "
+        f"schema: {schema_fields - dataclass_fields}"
+    )
 
 
 def test_call_context_schema_matches_dataclass() -> None:
     """CallContextAPI 字段与 CallContext dataclass 完全一致。"""
     dataclass_fields = {f.name for f in dataclasses.fields(CallContext)}
     schema_fields = set(CallContextAPI.model_fields.keys())
-    assert dataclass_fields == schema_fields
+    assert dataclass_fields == schema_fields, (
+        f"dataclass: {dataclass_fields - schema_fields}; "
+        f"schema: {schema_fields - dataclass_fields}"
+    )
 
 
 def test_all_schemas_strict_mode() -> None:
