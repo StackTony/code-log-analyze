@@ -23,3 +23,8 @@ metrics:
   enabled: true
   endpoint: /metrics
   port: 9100
+api:
+  host: "127.0.0.1"
+  port: 3004  # 家规铁律：与 frontend 3003 / metrics 9100 分离
+  enable_auth: false  # F001.1 dev-only
+  cors_origins: ["http://localhost:3003"]  # F003 前端

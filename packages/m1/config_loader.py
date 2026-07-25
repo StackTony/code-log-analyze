@@ -55,12 +55,22 @@ class MetricsConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class ApiConfig:
+    """F001.1 — HTTP 服务层配置（spec §七）。"""
+    host: str = "127.0.0.1"
+    port: int = 3004  # 家规铁律
+    enable_auth: bool = False  # F001.1 dev-only
+    cors_origins: tuple[str, ...] = ("http://localhost:3003",)  # F003 前端
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     llm: LLMConfig
     storage: StorageConfig
     extraction: ExtractionConfig
     sanitizer: SanitizerConfig
     metrics: MetricsConfig
+    api: ApiConfig = dataclasses.field(default_factory=ApiConfig)  # F001.1 新增
 
 
 def _expand_env(value: Any) -> Any:
@@ -82,6 +92,10 @@ def _env_override(config_dict: dict[str, Any]) -> dict[str, Any]:
     env_map = {
         "CODEFLY_LLM_API_KEY": ("llm", "api_key"),
         "CODEFLY_PG_DSN": ("storage", "postgres_dsn"),
+        "CODEFLY_API_HOST": ("api", "host"),
+        "CODEFLY_API_PORT": ("api", "port"),
+        "CODEFLY_API_ENABLE_AUTH": ("api", "enable_auth"),
+        "CODEFLY_API_CORS_ORIGINS": ("api", "cors_origins"),
     }
     for env_key, (section, field) in env_map.items():
         val = os.environ.get(env_key)
@@ -109,10 +123,31 @@ def load_config(path: pathlib.Path | None = None) -> Config:
             f"redis_port={FORBIDDEN_REDIS_PORT} 禁止使用 — Cat Cafe production Redis"
         )
 
+    # api 段（缺失时用默认值）
+    api_dict = expanded.get("api", {})
+    # cors_origins 可能是 list（YAML）或 str（env，逗号分隔）
+    cors = api_dict.get("cors_origins", ["http://localhost:3003"])
+    if isinstance(cors, str):
+        cors = tuple(c.strip() for c in cors.split(",") if c.strip())
+    else:
+        cors = tuple(cors)
+
+    # enable_auth 可能是 bool 或 str（env）
+    enable_auth = api_dict.get("enable_auth", False)
+    if isinstance(enable_auth, str):
+        enable_auth = enable_auth.lower() in ("true", "1", "yes")
+    port = int(api_dict.get("port", 3004))
+
     return Config(
         llm=LLMConfig(**expanded["llm"]),
         storage=StorageConfig(**expanded["storage"]),
         extraction=ExtractionConfig(**expanded["extraction"]),
         sanitizer=SanitizerConfig(**expanded["sanitizer"]),
         metrics=MetricsConfig(**expanded["metrics"]),
+        api=ApiConfig(
+            host=api_dict.get("host", "127.0.0.1"),
+            port=port,
+            enable_auth=enable_auth,
+            cors_origins=cors,
+        ),
     )
