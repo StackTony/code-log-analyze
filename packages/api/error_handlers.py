@@ -1,6 +1,8 @@
 """统一错误处理 — {code, message, details} 格式（spec §五 + §八 + AC-5）。"""
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -9,6 +11,21 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from packages.api.schemas.common import ErrorResponse
 from packages.m1.unit_a_repo_registrar import UnsafePathError, UnsafeUrlError
+
+
+def _json_safe_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把 RequestValidationError.errors() 转成 JSON-safe — ctx.error 通常是 ValueError 实例，json.dumps 无法序列化。"""
+    safe: list[dict[str, Any]] = []
+    for e in errors:
+        se = dict(e)
+        ctx = se.get("ctx")
+        if ctx and isinstance(ctx, dict):
+            se["ctx"] = {
+                k: (str(v) if isinstance(v, BaseException) else v)
+                for k, v in ctx.items()
+            }
+        safe.append(se)
+    return safe
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -43,7 +60,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=ErrorResponse(
                 code="GENERIC_VALIDATION_ERROR",
                 message="Request validation failed",
-                details={"errors": exc.errors()},
+                details={"errors": _json_safe_errors(exc.errors())},
             ).model_dump(),
         )
 
@@ -54,7 +71,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=ErrorResponse(
                 code="GENERIC_VALIDATION_ERROR",
                 message="Pydantic validation failed",
-                details={"errors": exc.errors()},
+                details={"errors": _json_safe_errors(exc.errors())},
             ).model_dump(),
         )
 
