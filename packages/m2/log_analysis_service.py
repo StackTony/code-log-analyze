@@ -201,16 +201,27 @@ class LogAnalysisService:
 
         # 5. 取前次 iteration 作为 parent（AC-10 累积上下文）
         existing = self._repo.list_deep_analyses(report_id)
-        # 同 line_ids 集合的前次（取 iteration 最大者）
+        # Q4 修复：父链匹配改为"有非空交集且 iteration 最大"，
+        # 多候选取交集最大者（最相关）。
+        # 场景：前次 [L1, L2] 本次 [L1]（子集）应继承 iteration + parent 链，
+        # 铲屎官"二次/多次"深入分析最常见的是"上次多行 → 这次一行"。
+        # 边界：完全不相交 → 新链 iteration=1。
         parent_record: DeepAnalysisRecord | None = None
         if existing:
             target_line_set = set(line_ids)
-            candidates = [
-                r for r in existing
-                if set(r.line_ids) == target_line_set
+            # 候选 = 有非空交集的前次 record
+            candidates_with_overlap = [
+                (r, len(set(r.line_ids) & target_line_set))
+                for r in existing
+                if set(r.line_ids) & target_line_set
             ]
-            if candidates:
-                parent_record = max(candidates, key=lambda r: r.iteration)
+            if candidates_with_overlap:
+                # 多候选取交集最大者；并列时取 iteration 最大者
+                candidates_with_overlap.sort(
+                    key=lambda x: (x[1], x[0].iteration),
+                    reverse=True,
+                )
+                parent_record = candidates_with_overlap[0][0]
 
         # 6. DeepAnalyzer.analyze() 调 LLM
         t0 = time.perf_counter()

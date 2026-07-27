@@ -413,6 +413,129 @@ class TestDeepAnalyze:
         assert second.iteration == 2
         assert second.parent_record_id == first.id
 
+    async def test_deep_analyze_subset_lines_uses_parent_with_overlap(
+        self, service: LogAnalysisService, repository: M2Repository,
+    ) -> None:
+        """Q4 修复：前次 [L1, L2] 本次 [L1]（子集）应继承 iteration + parent 链。
+
+        场景：铲屎官"二次/多次"深入分析最常见的是"上次分析多行，
+        这次只想再深入其中一行"——子集关系，不能丢上下文链。
+
+        修复策略：parent 选有非空交集且 iteration 最大者；
+        多候选取交集最大者（最相关）。
+        """
+        log_text = (
+            "2026-07-27 08:30:00,123 ERROR [db] connection failed\n"
+            "2026-07-27 08:31:00,123 ERROR [db] query timeout\n"
+        )
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        entries = repository.list_log_entries(report.id)
+        assert len(entries) == 2
+        line1, line2 = entries[0].line_id, entries[1].line_id
+
+        # Phase 2 round 1: 选 [L1, L2] 两行
+        first = await service.deep_analyze(
+            report_id=report.id, line_ids=[line1, line2],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        assert first.iteration == 1
+        assert first.parent_record_id is None
+
+        # Phase 2 round 2: 只选 [L1] 一行（子集）
+        # Q4 修复前：set(L1) != set(L1, L2) → parent=None → iteration=1（丢链）
+        # Q4 修复后：有非空交集 → 继承 iteration=2 + parent=first.id
+        second = await service.deep_analyze(
+            report_id=report.id, line_ids=[line1],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        assert second.iteration == 2
+        assert second.parent_record_id == first.id
+        # 新 record 的 line_ids 是本次选的（[L1]）
+        assert second.line_ids == [line1]
+
+    async def test_deep_analyze_disjoint_lines_starts_iteration_1(
+        self, service: LogAnalysisService, repository: M2Repository,
+    ) -> None:
+        """Q4 边界：完全不相交的 line 集合应 iteration=1（新链）。"""
+        log_text = (
+            "2026-07-27 08:30:00,123 ERROR [db] connection failed\n"
+            "2026-07-27 08:31:00,123 ERROR [db] query timeout\n"
+        )
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        entries = repository.list_log_entries(report.id)
+        line1, line2 = entries[0].line_id, entries[1].line_id
+
+        # 第一次：[L1]
+        first = await service.deep_analyze(
+            report_id=report.id, line_ids=[line1],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        # 第二次：[L2]（不相交）
+        second = await service.deep_analyze(
+            report_id=report.id, line_ids=[line2],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        # 不相交 → 新链 → iteration=1
+        assert second.iteration == 1
+        assert second.parent_record_id is None
+
+    async def test_deep_analyze_subset_picks_most_overlap_when_multiple(
+        self, service: LogAnalysisService, repository: M2Repository,
+    ) -> None:
+        """Q4 边界：多个候选父时取交集最大者（最相关）。
+
+        历史：
+          - [L1, L2] iter=1
+          - [L1, L2] iter=2（parent=iter1）
+          - [L1] iter=3（parent=iter2，因为 [L1] ⊂ [L1, L2] 交集 1）
+        现在：[L1, L2, L3]——
+          - 与 [L1, L2] iter=2 交集 2
+          - 与 [L1] iter=3 交集 1
+          → 取交集大者 iter=2 → 继承 iteration=3
+        """
+        log_text = (
+            "2026-07-27 08:30:00,123 ERROR [db] connection failed\n"
+            "2026-07-27 08:31:00,123 ERROR [db] query timeout\n"
+            "2026-07-27 08:32:00,123 ERROR [db] pool exhausted\n"
+        )
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        entries = repository.list_log_entries(report.id)
+        l1, l2, l3 = (e.line_id for e in entries)
+
+        await service.deep_analyze(
+            report_id=report.id, line_ids=[l1, l2],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        await service.deep_analyze(
+            report_id=report.id, line_ids=[l1, l2],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        await service.deep_analyze(
+            report_id=report.id, line_ids=[l1],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        record = await service.deep_analyze(
+            report_id=report.id, line_ids=[l1, l2, l3],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        # 选交集最大的 parent（iter=2 的 [L1, L2]），继承 iter=3
+        assert record.iteration == 3
+        # parent 应是 [L1, L2] iter=2 那条
+        from packages.contracts.deep_analysis import DeepAnalysisRecord
+        parent = service._repo.get_deep_analysis(record.parent_record_id)
+        assert parent is not None
+        assert set(parent.line_ids) == {l1, l2}
+        assert parent.iteration == 2
+
 
 # ---- get_report + list_deep_analyses ----
 
