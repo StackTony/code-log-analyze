@@ -23,6 +23,7 @@ from packages.m1.log_sanitizer import SanitizerConfig as LogSanitizerConfig
 from packages.m1.metrics_emitter import MetricsEmitter
 from packages.m1.repo_log_graph_service import RepoLogGraphService
 from packages.m1.tree_sitter_parser import TreeSitterParser
+from packages.m2.metrics_emitter import M2MetricsEmitter
 
 if TYPE_CHECKING:
     pass
@@ -36,14 +37,23 @@ SessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=Fals
 
 # Module-level singleton emitter — constructed once per worker, reused across requests.
 _metrics_emitter: MetricsEmitter | None = None
+_m2_metrics_emitter: M2MetricsEmitter | None = None
 
 
 def _get_metrics_emitter() -> MetricsEmitter:
-    """Get or create the singleton MetricsEmitter instance."""
+    """Get or create the singleton M1 MetricsEmitter instance."""
     global _metrics_emitter
     if _metrics_emitter is None:
         _metrics_emitter = MetricsEmitter()
     return _metrics_emitter
+
+
+def _get_m2_metrics_emitter() -> M2MetricsEmitter:
+    """Get or create the singleton M2 MetricsEmitter instance（spec §八 + AC-14）。"""
+    global _m2_metrics_emitter
+    if _m2_metrics_emitter is None:
+        _m2_metrics_emitter = M2MetricsEmitter()
+    return _m2_metrics_emitter
 
 
 def get_session() -> Generator[Session, None, None]:
@@ -167,6 +177,7 @@ def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
         ),
         hypothesis_writer=HypothesisWriter(m1_service=m1_service),
         m1_service=m1_service,
+        metrics=_get_m2_metrics_emitter(),
     )
     try:
         yield service

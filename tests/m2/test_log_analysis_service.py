@@ -182,6 +182,45 @@ def service(
     )
 
 
+@pytest.fixture()
+def metrics_mock() -> MagicMock:
+    """M2MetricsEmitter mock — 用于 service 集成测试。"""
+    from packages.m2.metrics_emitter import M2MetricsEmitter
+    m = MagicMock(spec=M2MetricsEmitter)
+    return m
+
+
+@pytest.fixture()
+def service_with_metrics(
+    session: Session, audit: AuditLogger, cache: MagicMock,
+    llm_client_phase1: AsyncMock, llm_client_phase2: AsyncMock,
+    sanitizer: LogSanitizer, repository: M2Repository,
+    log_point_index: MagicMock, m1_service: MagicMock,
+    metrics_mock: MagicMock,
+) -> LogAnalysisService:
+    """Service with metrics emitter attached（用于 AC-14 集成测试）。"""
+    return LogAnalysisService(
+        session=session,
+        audit=audit,
+        repository=repository,
+        log_parser=LogParser(),
+        log_point_matcher=LogPointMatcher(log_point_index),
+        report_generator=ReportGenerator(
+            llm_client=llm_client_phase1, cache=cache, sanitizer=sanitizer,
+            config=Phase1Config(model_name="claude-haiku", window_hours=24,
+                                max_log_lines_per_call=200, cache_ttl_seconds=86400),
+        ),
+        deep_analyzer=DeepAnalyzer(
+            llm_client=llm_client_phase2, cache=cache, sanitizer=sanitizer,
+            config=Phase2Config(model_name="claude-opus-4", max_iterations=5,
+                                cache_ttl_seconds=86400),
+        ),
+        hypothesis_writer=HypothesisWriter(m1_service=m1_service),
+        m1_service=m1_service,
+        metrics=metrics_mock,
+    )
+
+
 # ---- analyze_logs (Phase 1) ----
 
 class TestAnalyzeLogs:
@@ -463,3 +502,76 @@ class TestArchiveReport:
         """归档不存在的 report 抛 ValueError（service 层契约）。"""
         with pytest.raises(ValueError, match="not found"):
             service.archive_report("rpt-missing", archiver=User(id="u", name="n"))
+
+
+# ---- AC-14: metrics 集成 ----
+
+class TestMetricsIntegration:
+    """AC-14: LogAnalysisService 集成 M2MetricsEmitter。"""
+
+    async def test_analyze_logs_emits_metrics(
+        self, service_with_metrics: LogAnalysisService,
+        metrics_mock: MagicMock,
+    ) -> None:
+        """Phase 1 analyze_logs 完成后写 4 个指标：
+        set_log_point_match_rate + observe_llm_call_duration(phase1)
+        + inc_llm_cost + inc_analysis_report
+        """
+        log_text = "2026-07-27 08:30:00,123 INFO system ready"
+        await service_with_metrics.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="u1", name="alice"),
+        )
+        # AC-14: 4 个指标都被调用
+        metrics_mock.set_log_point_match_rate.assert_called_once()
+        metrics_mock.observe_llm_call_duration.assert_called_once()
+        # 验证 phase 标签
+        assert metrics_mock.observe_llm_call_duration.call_args.kwargs["phase"] == "phase1"
+        # seconds 是 float > 0（实际 LLM 调用耗时，mock 立即返回）
+        assert metrics_mock.observe_llm_call_duration.call_args.kwargs["seconds"] >= 0.0
+        metrics_mock.inc_llm_cost.assert_called_once_with(usd=0.02)
+        metrics_mock.inc_analysis_report.assert_called_once_with(
+            repo_id="<no-repo>",
+        )
+
+    async def test_deep_analyze_emits_metrics(
+        self, service_with_metrics: LogAnalysisService,
+        repository: M2Repository, metrics_mock: MagicMock,
+    ) -> None:
+        """Phase 2 deep_analyze 完成后写 3 个指标：
+        observe_llm_call_duration(phase2) + inc_llm_cost + inc_deep_analysis
+        """
+        log_text = "2026-07-27 08:30:00,123 ERROR connection failed"
+        report = await service_with_metrics.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="u1", name="alice"),
+        )
+        # 重置 mock 计数（只看 deep_analyze 触发的）
+        metrics_mock.reset_mock()
+
+        entries = repository.list_log_entries(report.id)
+        line_id = entries[0].line_id
+
+        await service_with_metrics.deep_analyze(
+            report_id=report.id, line_ids=[line_id],
+            analyzer=User(id="u1", name="alice"),
+        )
+        # AC-14: 3 个指标都被调用
+        metrics_mock.observe_llm_call_duration.assert_called_once()
+        assert metrics_mock.observe_llm_call_duration.call_args.kwargs["phase"] == "phase2"
+        assert metrics_mock.observe_llm_call_duration.call_args.kwargs["seconds"] >= 0.0
+        metrics_mock.inc_llm_cost.assert_called_once_with(usd=0.05)
+        metrics_mock.inc_deep_analysis.assert_called_once_with(
+            repo_id="<no-repo>",
+        )
+
+    async def test_analyze_logs_without_metrics_emitter_skips_metrics(
+        self, service: LogAnalysisService,
+    ) -> None:
+        """metrics=None 时不抛错（生产旧代码向后兼容）。"""
+        log_text = "2026-07-27 08:30:00,123 INFO system ready"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="u1", name="alice"),
+        )
+        assert report.system_summary == "system had errors"

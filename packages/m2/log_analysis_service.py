@@ -1,10 +1,10 @@
-"""F002 M2 — LogAnalysisService（spec §四 + AC-15）。
+"""F002 M2 — LogAnalysisService（spec §四 + AC-15 + AC-14）。
 
 5 个 API 方法编排层：
   - analyze_logs: LogParser → LogPointMatcher → ReportGenerator
-                  → M2Repository.save + audit_log
+                  → M2Repository.save + audit_log + metrics
   - deep_analyze: get_call_context + DeepAnalyzer + HypothesisWriter
-                 → M2Repository.save + audit_log
+                 → M2Repository.save + audit_log + metrics
   - get_report: M2Repository.get_analysis_report
   - list_deep_analyses: M2Repository.list_deep_analyses
   - archive_report: M2Repository.archive_report + audit_log
@@ -19,11 +19,14 @@
   - deep_analyzer: DeepAnalyzer（Phase 2 LLM）
   - hypothesis_writer: HypothesisWriter（M1 回写入口）
   - m1_service: M1 RepoLogGraphService（get_call_context + update_log_point_hypothesis）
+  - metrics: 可选 M2MetricsEmitter（spec §八 + AC-14，None 时不发送指标）
 """
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
@@ -44,9 +47,12 @@ from packages.m2.log_point_matcher import LogPointMatcher
 from packages.m2.report_generator import ReportGenerator
 from packages.m2.storage.repository import M2Repository
 
+if TYPE_CHECKING:
+    from packages.m2.metrics_emitter import M2MetricsEmitter
+
 
 class LogAnalysisService:
-    """M2 离线 LLM 分析服务（spec §四 + AC-15）。"""
+    """M2 离线 LLM 分析服务（spec §四 + AC-15 + AC-14）。"""
 
     def __init__(
         self,
@@ -59,6 +65,7 @@ class LogAnalysisService:
         deep_analyzer: DeepAnalyzer,
         hypothesis_writer: HypothesisWriter,
         m1_service: "M1ServiceProtocol",
+        metrics: "M2MetricsEmitter | None" = None,
     ) -> None:
         self._session = session
         self._audit = audit
@@ -69,6 +76,7 @@ class LogAnalysisService:
         self._deep = deep_analyzer
         self._writer = hypothesis_writer
         self._m1 = m1_service
+        self._metrics = metrics
 
     # ---- Phase 1: analyze_logs ----
 
@@ -88,6 +96,7 @@ class LogAnalysisService:
           4. ReportGenerator.generate() 调 LLM 生成报告
           5. M2Repository.save_analysis_report + save_log_entries 持久化
           6. 写 audit_log action=ACTION_PHASE1_ANALYZE
+          7. 写 metrics（AC-14）
         """
         log_text = log_source.resolve_text()
         entries = self._parser.parse(log_text, source_file=log_source.file_path)
@@ -95,13 +104,27 @@ class LogAnalysisService:
         # 匹配 M1 LogPoint（即使 repo_id 为 None，matcher 也会跑，log_point 全 fallback None）
         match_results = self._matcher.match(entries)
 
+        # AC-14: 更新 log_point_match_rate gauge
+        if self._metrics is not None and entries:
+            matched = sum(1 for r in match_results if r.log_point is not None)
+            rate = matched / len(entries)
+            self._metrics.set_log_point_match_rate(rate=rate)
+
         # 生成 Phase 1 报告（duration 计时在 generator 内）
+        t0 = time.perf_counter()
         report = await self._gen.generate(
             entries=entries,
             log_source=log_source.file_path or "<text>",
             repo_id=repo_id,
             window_hours_override=window_hours,
         )
+        elapsed = time.perf_counter() - t0
+
+        # AC-14: LLM 调用耗时 + 成本累计
+        if self._metrics is not None:
+            self._metrics.observe_llm_call_duration(phase="phase1", seconds=elapsed)
+            self._metrics.inc_llm_cost(usd=report.token_usage.total_cost_usd)
+            self._metrics.inc_analysis_report(repo_id=repo_id or "<no-repo>")
 
         # 持久化 AnalysisReport + LogEntry（AC-16 P0 持久化）
         self._repo.save_analysis_report(report)
@@ -190,6 +213,7 @@ class LogAnalysisService:
                 parent_record = max(candidates, key=lambda r: r.iteration)
 
         # 6. DeepAnalyzer.analyze() 调 LLM
+        t0 = time.perf_counter()
         record = await self._deep.analyze(
             report_id=report_id,
             entries=selected_entries,
@@ -198,6 +222,15 @@ class LogAnalysisService:
             phase1_report=phase1_report,
             parent_record=parent_record,
         )
+        elapsed = time.perf_counter() - t0
+
+        # AC-14: LLM 调用耗时 + 成本累计 + deep_analysis counter
+        if self._metrics is not None:
+            self._metrics.observe_llm_call_duration(phase="phase2", seconds=elapsed)
+            self._metrics.inc_llm_cost(usd=record.token_usage.total_cost_usd)
+            self._metrics.inc_deep_analysis(
+                repo_id=phase1_report.repo_id or "<no-repo>",
+            )
 
         # 7. 持久化
         self._repo.save_deep_analysis(record)
