@@ -14,7 +14,7 @@ Phase 2 DeepAnalysisRecord → M1 LogPoint.llm_hypothesis 回写入口。
   prompt_hash           → prompt_hash    # 直传
   generated_at          → generated_at   # 直传
   possible_causes       → []             # DeepAnalysisRecord 没有等价字段，留空
-  error_kind            → "unknown"      # 留空，M4 改进模块不依赖此字段
+  error_kind            → ERROR_KIND_UNKNOWN  # DeepAnalysisRecord 无等价字段，留默认
 
 回写规则：
   - log_point_ids 为空（无 LogPoint 匹配）→ 不调用 M1，返回 0
@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from packages.contracts.deep_analysis import DeepAnalysisRecord
+from packages.contracts.enums import ERROR_KIND_UNKNOWN
 from packages.contracts.log_point import LLMHypothesis
 
 
@@ -72,7 +73,7 @@ class HypothesisWriter:
         hypothesis = LLMHypothesis(
             summary=record.root_cause_hypothesis,
             possible_causes=[],  # DeepAnalysisRecord 没有等价字段，留空
-            error_kind="unknown",
+            error_kind=ERROR_KIND_UNKNOWN,  # DeepAnalysisRecord 无等价字段，留默认
             suggested_check=record.fix_suggestion,
             model_name=record.model_name,
             prompt_hash=record.prompt_hash,
