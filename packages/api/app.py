@@ -1,8 +1,10 @@
 """FastAPI app — F001.1 HTTP 服务层入口（spec §六 + §三）。"""
 from __future__ import annotations
 
+import atexit
 import logging
 import multiprocessing
+import socket
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -24,10 +26,43 @@ logger.setLevel(logging.INFO)
 
 _config = load_config()
 
+# Module-level handle for atexit fallback cleanup（v1.1 B-4 修订）
+_metrics_process_ref: multiprocessing.Process | None = None
+
+
+def _is_port_in_use(port: int) -> bool:
+    """检查端口是否被占用（v1.1 B-4 修订：避免重复启动 metrics process 留下孤儿）。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+    return False
+
+
+def _cleanup_metrics_process(process: multiprocessing.Process | None) -> None:
+    """统一清理逻辑（lifespan cleanup + atexit fallback 共用）。"""
+    if process and process.is_alive():
+        process.terminate()
+        process.join(timeout=2)
+        # Windows terminate 强杀，prometheus_client 是 pull 模式无数据丢失风险（spec §六 B-3 注释）
+
+
+@atexit.register
+def _atexit_cleanup_metrics() -> None:
+    """进程退出兜底清理（v1.1 B-4 修订：uvicorn worker 异常退出时也能回收 9464 进程）。"""
+    global _metrics_process_ref
+    if _metrics_process_ref is not None:
+        _cleanup_metrics_process(_metrics_process_ref)
+        _metrics_process_ref = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """启动 metrics server 独立进程 + console 警告（spec §六 + AC-7 + AC-10 + AC-11）。"""
+    global _metrics_process_ref
+
     # AC-7：未启用认证警告
     if not _config.api.enable_auth:
         logger.warning("⚠️  未启用认证，dev-only 模式 — 禁止暴露公网")
@@ -36,14 +71,23 @@ async def lifespan(app: FastAPI):
     metrics_process: multiprocessing.Process | None = None
     try:
         if _config.metrics.enabled and _config.metrics.port:
-            metrics_process = multiprocessing.Process(
-                target=start_http_server,
-                args=(_config.metrics.port,),
-                daemon=True,
-            )
-            metrics_process.start()
-            logger.info("Metrics server started on port %s (pid=%s)",
-                        _config.metrics.port, metrics_process.pid)
+            # v1.1 B-4：端口已占用时跳过启动（避免 lifespan 重入留孤儿进程）
+            if _is_port_in_use(_config.metrics.port):
+                logger.warning(
+                    "Metrics port %s already in use — skipping metrics server start "
+                    "(likely orphan from previous lifespan; Prometheus 抓取仍可用)",
+                    _config.metrics.port,
+                )
+            else:
+                metrics_process = multiprocessing.Process(
+                    target=start_http_server,
+                    args=(_config.metrics.port,),
+                    daemon=True,
+                )
+                metrics_process.start()
+                _metrics_process_ref = metrics_process  # 给 atexit 兜底用
+                logger.info("Metrics server started on port %s (pid=%s)",
+                            _config.metrics.port, metrics_process.pid)
     except Exception as e:
         # AC-11：graceful degradation，metrics 启动失败不阻断 API
         logger.warning("Metrics server failed to start: %s. Continuing without metrics.", e)
@@ -51,9 +95,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # cleanup
-    if metrics_process and metrics_process.is_alive():
-        metrics_process.terminate()
-        metrics_process.join(timeout=2)
+    _cleanup_metrics_process(metrics_process)
+    _metrics_process_ref = None
 
 
 app = FastAPI(

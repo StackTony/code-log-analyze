@@ -37,10 +37,10 @@ sanitizer:
 metrics:
   enabled: true
   endpoint: /metrics
-  port: 9100
+  port: 9464
 api:
   host: 127.0.0.1
-  port: 3004
+  port: 8000
   enable_auth: false
   cors_origins: ["http://localhost:3003"]
 """
@@ -54,7 +54,7 @@ def test_api_config_loaded(config_yaml: pathlib.Path) -> None:
     """load_config 返回 Config 含 api 段。"""
     config = load_config(config_yaml)
     assert isinstance(config.api, ApiConfig)
-    assert config.api.port == 3004
+    assert config.api.port == 8000  # v1.1 修正：避开 CatCafe runtime 3003/3004
     assert config.api.host == "127.0.0.1"
     assert config.api.enable_auth is False
     assert "http://localhost:3003" in config.api.cors_origins
@@ -64,13 +64,13 @@ def test_api_config_defaults_when_missing(config_yaml: pathlib.Path) -> None:
     """config.yaml 缺 api 段时用默认值。"""
     # 改写 yaml 去掉 api 段
     content = config_yaml.read_text(encoding="utf-8").replace(
-        "api:\n  host: 127.0.0.1\n  port: 3004\n  enable_auth: false\n  cors_origins: [\"http://localhost:3003\"]\n",
+        "api:\n  host: 127.0.0.1\n  port: 8000\n  enable_auth: false\n  cors_origins: [\"http://localhost:3003\"]\n",
         "",
     )
     config_yaml.write_text(content, encoding="utf-8")
     config = load_config(config_yaml)
-    # 默认值
-    assert config.api.port == 3004  # 家规铁律默认
+    # 默认值（v1.1 修正：避开 CatCafe runtime 自留地 3003/3004，默认 8000）
+    assert config.api.port == 8000
     assert config.api.host == "127.0.0.1"
     assert config.api.enable_auth is False
 
