@@ -1,0 +1,465 @@
+"""F002 M2 — LogAnalysisService 测试（spec §四 + AC-3/9/15/19）。
+
+验证 5 个 API 方法编排：
+  - analyze_logs: LogParser → LogPointMatcher → ReportGenerator → M2Repository + audit
+  - deep_analyze: M1 get_call_context + ReportGenerator 摘要 + DeepAnalyzer
+    + HypothesisWriter 回写 + M2Repository + audit
+  - get_report: M2Repository.get_analysis_report
+  - list_deep_analyses: M2Repository.list_deep_analyses
+  - archive_report: M2Repository.archive_report + audit
+
+验证点：
+  - AC-15: 每个写操作（analyze/deep_analyze/archive）写 audit_log
+  - AC-19: 端到端 fixture：upload log → Phase 1 → 选 line → Phase 2 → 验证 M1 回写
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from packages.contracts.analysis_report import (
+    AnalysisReport,
+    Anomaly,
+    ErrorChain,
+    TokenUsage,
+)
+from packages.contracts.audit import AuditLog
+from packages.contracts.deep_analysis import DeepAnalysisRecord
+from packages.contracts.enums import (
+    ACTION_ARCHIVE_REPORT,
+    ACTION_PHASE1_ANALYZE,
+    ACTION_PHASE2_DEEP_ANALYZE,
+    STATUS_ARCHIVED,
+    STATUS_DRAFT,
+)
+from packages.contracts.log_entry import LogEntry, LogSource
+from packages.contracts.log_point import CallContext, CaseRef, LogPoint
+from packages.m1.audit_log import AuditLogger
+from packages.m1.log_sanitizer import LogSanitizer, SanitizerConfig
+from packages.m1.llm_hypothesis_generator import LLMClient, RedisCache
+from packages.m1.storage.models import Base
+from packages.m1.unit_a_repo_registrar import User
+from packages.m2.deep_analyzer import DeepAnalyzer, Phase2Config
+from packages.m2.hypothesis_writer import HypothesisWriter
+from packages.m2.log_analysis_service import LogAnalysisService
+from packages.m2.log_parser import LogParser
+from packages.m2.log_point_matcher import LogPointMatcher
+from packages.m2.report_generator import Phase1Config, ReportGenerator
+from packages.m2.storage.repository import M2Repository
+
+
+# ---- Fixtures ----
+
+@pytest.fixture()
+def session():
+    eng = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(eng)
+    with Session(eng) as s:
+        yield s
+    eng.dispose()
+
+
+@pytest.fixture()
+def audit(session: Session) -> AuditLogger:
+    return AuditLogger(session)
+
+
+@pytest.fixture()
+def cache() -> MagicMock:
+    c = MagicMock(spec=RedisCache)
+    c.get.return_value = None
+    return c
+
+
+@pytest.fixture()
+def llm_client_phase1() -> AsyncMock:
+    """Phase 1 LLM mock — 返回固定三类信息 JSON。"""
+    client = AsyncMock(spec=LLMClient)
+    import json
+    client.complete.return_value = json.dumps({
+        "system_summary": "system had errors",
+        "anomaly_localization": [{
+            "line_ids": ["le-1"], "severity": "error", "module": "auth",
+            "summary": "auth failures", "evidence_snippets": ["raw"],
+        }],
+        "error_correlation": [{
+            "chain_id": "c1", "line_ids_ordered": ["le-1"],
+            "relation": "causal", "summary": "chain", "confidence_score": 0.8,
+        }],
+        "token_usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_cost_usd": 0.02},
+    })
+    return client
+
+
+@pytest.fixture()
+def llm_client_phase2() -> AsyncMock:
+    """Phase 2 LLM mock — 返回 root_cause + fix + evidence JSON。"""
+    client = AsyncMock(spec=LLMClient)
+    import json
+    client.complete.return_value = json.dumps({
+        "root_cause_hypothesis": "db pool exhausted",
+        "fix_suggestion": "increase pool size",
+        "related_evidence": [{
+            "case_id": "case-1", "repo_id": "repo-1",
+            "file_path": "app/db.py", "function_signature": "def connect()",
+            "log_template": "db connection failed",
+            "resolved_at": "2026-07-01T00:00:00+00:00",
+            "resolution_summary": "fixed by retry",
+            "resolution_diff_url": "https://example.com/diff/1",
+        }],
+        "token_usage": {"prompt_tokens": 200, "completion_tokens": 100, "total_cost_usd": 0.05},
+    })
+    return client
+
+
+@pytest.fixture()
+def sanitizer() -> LogSanitizer:
+    return LogSanitizer(SanitizerConfig(
+        enabled=True, patterns=["api_key", "password", "token"],
+        replacement="[REDACTED_{kind}]",
+    ))
+
+
+@pytest.fixture()
+def repository(session: Session) -> M2Repository:
+    return M2Repository(session)
+
+
+@pytest.fixture()
+def log_point_index() -> MagicMock:
+    """M1 LogPoint 主表索引 mock。"""
+    from packages.m2.log_point_matcher import LogPointIndex
+    idx = MagicMock(spec=LogPointIndex)
+    idx.lookup_by_template_hash.return_value = None  # 默认未命中
+    return idx
+
+
+@pytest.fixture()
+def m1_service() -> MagicMock:
+    """M1 RepoLogGraphService mock — 用于 deep_analyze 调用 get_call_context
+    和 update_log_point_hypothesis。"""
+    m = MagicMock()
+    m.get_call_context.return_value = CallContext(
+        function_signature="def connect()",
+        callers=["def handle()"], callees=["def ping()"],
+        enclosing_community="DbModule",
+        related_log_points=[], evidence_refs=[],
+    )
+    m.update_log_point_hypothesis.return_value = 1  # 默认成功更新 1 条
+    return m
+
+
+@pytest.fixture()
+def service(
+    session: Session, audit: AuditLogger, cache: MagicMock,
+    llm_client_phase1: AsyncMock, llm_client_phase2: AsyncMock,
+    sanitizer: LogSanitizer, repository: M2Repository,
+    log_point_index: MagicMock, m1_service: MagicMock,
+) -> LogAnalysisService:
+    return LogAnalysisService(
+        session=session,
+        audit=audit,
+        repository=repository,
+        log_parser=LogParser(),
+        log_point_matcher=LogPointMatcher(log_point_index),
+        report_generator=ReportGenerator(
+            llm_client=llm_client_phase1, cache=cache, sanitizer=sanitizer,
+            config=Phase1Config(model_name="claude-haiku", window_hours=24,
+                                max_log_lines_per_call=200, cache_ttl_seconds=86400),
+        ),
+        deep_analyzer=DeepAnalyzer(
+            llm_client=llm_client_phase2, cache=cache, sanitizer=sanitizer,
+            config=Phase2Config(model_name="claude-opus-4", max_iterations=5,
+                                cache_ttl_seconds=86400),
+        ),
+        hypothesis_writer=HypothesisWriter(m1_service=m1_service),
+        m1_service=m1_service,
+    )
+
+
+# ---- analyze_logs (Phase 1) ----
+
+class TestAnalyzeLogs:
+    """Phase 1 全量分析端到端。"""
+
+    async def test_analyze_logs_text_source(
+        self, service: LogAnalysisService, repository: M2Repository,
+        audit: AuditLogger, session: Session,
+    ) -> None:
+        """从文本日志生成 Phase 1 报告 + 持久化 + 写 audit_log。"""
+        log_text = """
+2026-07-27 08:30:00,123 INFO [auth] User 12345 logged in
+2026-07-27 08:31:00,456 ERROR [db] connection failed to postgres://host:5432
+"""
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+
+        assert isinstance(report, AnalysisReport)
+        assert report.system_summary == "system had errors"
+        assert report.ingestion_status == STATUS_DRAFT
+        assert report.log_line_count == 2
+
+        # 持久化
+        persisted = repository.get_analysis_report(report.id)
+        assert persisted is not None
+        assert persisted.system_summary == "system had errors"
+
+        # LogEntry 持久化（关联 report_id）
+        entries = repository.list_log_entries(report.id)
+        assert len(entries) == 2
+
+        # AC-15: 写 audit_log
+        from packages.m1.storage.models import AuditLogModel
+        audit_rows = session.query(AuditLogModel).filter_by(
+            action=ACTION_PHASE1_ANALYZE
+        ).all()
+        assert len(audit_rows) == 1
+        assert audit_rows[0].actor == "user-1"
+
+    async def test_analyze_logs_with_repo_id(
+        self, service: LogAnalysisService, log_point_index: MagicMock,
+    ) -> None:
+        """有 repo_id 时启用 M1 LogPoint 匹配。"""
+        # 准备一个 LogPoint 让 matcher 命中
+        from packages.m2.log_point_matcher import (
+            LogPointIndex, _normalize_to_signature, _hash_signature,
+        )
+        log_point = LogPoint(
+            id="lp-1", repo_id="repo-1", git_commit_sha="sha",
+            extractor_version="v", file_path="app/auth.py",
+            function_signature="def login()", line_start=10, line_end=10,
+            language="python", log_level="INFO",
+            log_message_template="User {uid} logged in",
+            log_message_variables=["uid"], framework_hint="logging",
+            confidence_score=0.9, enclosing_class=None,
+            call_chain_to_entry=[], enclosing_community=None,
+            first_seen_at=datetime(2026, 7, 27, tzinfo=UTC),
+            last_seen_at=datetime(2026, 7, 27, tzinfo=UTC),
+        )
+        h = _hash_signature(_normalize_to_signature("User {uid} logged in"))
+        log_point_index.lookup_by_template_hash.return_value = log_point
+
+        log_text = "2026-07-27 08:30:00,123 INFO [auth] User 12345 logged in"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+            repo_id="repo-1",
+        )
+        assert report.repo_id == "repo-1"
+
+
+# ---- deep_analyze (Phase 2) ----
+
+class TestDeepAnalyze:
+    """Phase 2 深入分析端到端 + M1 回写。"""
+
+    async def test_deep_analyze_writes_record_and_calls_m1(
+        self, service: LogAnalysisService, repository: M2Repository,
+        m1_service: MagicMock, session: Session,
+    ) -> None:
+        """AC-19 端到端：先 analyze_logs，再 deep_analyze，验证 M1 回写。"""
+        # Phase 1: 先有报告 + LogEntry 持久化
+        log_text = "2026-07-27 08:30:00,123 ERROR [db] connection failed"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        # 取 line_id
+        entries = repository.list_log_entries(report.id)
+        assert len(entries) == 1
+        line_id = entries[0].line_id
+
+        # Phase 2: 选这一行深入分析
+        record = await service.deep_analyze(
+            report_id=report.id,
+            line_ids=[line_id],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        assert isinstance(record, DeepAnalysisRecord)
+        assert record.report_id == report.id
+        assert record.iteration == 1
+        assert record.parent_record_id is None
+        assert record.root_cause_hypothesis == "db pool exhausted"
+        assert record.fix_suggestion == "increase pool size"
+
+        # 持久化
+        persisted = repository.get_deep_analysis(record.id)
+        assert persisted is not None
+
+        # AC-9: M1 update_log_point_hypothesis 被调用（即使 log_point_ids 为空也不调用，
+        # 但 deep_analyze 内应尝试回写——这里因 LogPointMatcher fallback 无匹配，
+        # 不调用 M1）
+        # 此测试中 LogPoint 未命中，故 m1_service.update_log_point_hypothesis 不应被调
+        m1_service.update_log_point_hypothesis.assert_not_called()
+
+        # AC-15: 写 audit_log
+        from packages.m1.storage.models import AuditLogModel
+        audit_rows = session.query(AuditLogModel).filter_by(
+            action=ACTION_PHASE2_DEEP_ANALYZE
+        ).all()
+        assert len(audit_rows) == 1
+
+    async def test_deep_analyze_with_log_point_match_calls_m1_writeback(
+        self, service: LogAnalysisService, repository: M2Repository,
+        m1_service: MagicMock, log_point_index: MagicMock,
+    ) -> None:
+        """AC-9 + AC-19: LogPoint 匹配命中时，deep_analyze 后回写 M1。"""
+        from packages.m2.log_point_matcher import (
+            _normalize_to_signature, _hash_signature,
+        )
+        # 一个匹配 "connection failed" 的 LogPoint
+        log_point = LogPoint(
+            id="lp-1", repo_id="repo-1", git_commit_sha="sha",
+            extractor_version="v", file_path="app/db.py",
+            function_signature="def connect()",
+            line_start=10, line_end=10, language="python",
+            log_level="ERROR",
+            log_message_template="connection failed",
+            log_message_variables=[], framework_hint="logging",
+            confidence_score=0.9, enclosing_class=None,
+            call_chain_to_entry=[], enclosing_community="DbModule",
+            first_seen_at=datetime(2026, 7, 27, tzinfo=UTC),
+            last_seen_at=datetime(2026, 7, 27, tzinfo=UTC),
+        )
+        h = _hash_signature(_normalize_to_signature("connection failed"))
+        log_point_index.lookup_by_template_hash.return_value = log_point
+
+        log_text = "2026-07-27 08:30:00,123 ERROR [db] connection failed"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+            repo_id="repo-1",
+        )
+        entries = repository.list_log_entries(report.id)
+        line_id = entries[0].line_id
+
+        record = await service.deep_analyze(
+            report_id=report.id, line_ids=[line_id],
+            analyzer=User(id="user-1", name="alice"),
+        )
+
+        # AC-9: M1 update_log_point_hypothesis 被调用
+        m1_service.update_log_point_hypothesis.assert_called_once()
+        call_kwargs = m1_service.update_log_point_hypothesis.call_args.kwargs
+        assert call_kwargs["log_point_ids"] == ["lp-1"]
+        assert call_kwargs["writer"] == "m2-phase2-deep-analyzer"
+
+    async def test_deep_analyze_iteration_2_with_parent(
+        self, service: LogAnalysisService, repository: M2Repository,
+    ) -> None:
+        """AC-10: 同 line 第 2 次 deep_analyze iteration=2 + parent 链。"""
+        log_text = "2026-07-27 08:30:00,123 ERROR [db] connection failed"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        entries = repository.list_log_entries(report.id)
+        line_id = entries[0].line_id
+
+        first = await service.deep_analyze(
+            report_id=report.id, line_ids=[line_id],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        second = await service.deep_analyze(
+            report_id=report.id, line_ids=[line_id],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        assert second.iteration == 2
+        assert second.parent_record_id == first.id
+
+
+# ---- get_report + list_deep_analyses ----
+
+class TestQueryAPIs:
+    """get_report + list_deep_analyses 只读 API。"""
+
+    async def test_get_report_returns_dataclass(
+        self, service: LogAnalysisService, repository: M2Repository,
+    ) -> None:
+        log_text = "2026-07-27 08:30:00,123 INFO system ready"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        fetched = service.get_report(report.id)
+        assert fetched is not None
+        assert fetched.id == report.id
+
+    async def test_get_report_returns_none_when_missing(
+        self, service: LogAnalysisService
+    ) -> None:
+        assert service.get_report("rpt-missing") is None
+
+    async def test_list_deep_analyses_empty(
+        self, service: LogAnalysisService
+    ) -> None:
+        assert service.list_deep_analyses("rpt-no-deep") == []
+
+    async def test_list_deep_analyses_after_two_iterations(
+        self, service: LogAnalysisService, repository: M2Repository,
+    ) -> None:
+        log_text = "2026-07-27 08:30:00,123 ERROR connection failed"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        entries = repository.list_log_entries(report.id)
+        line_id = entries[0].line_id
+
+        await service.deep_analyze(
+            report_id=report.id, line_ids=[line_id],
+            analyzer=User(id="user-1", name="alice"),
+        )
+        await service.deep_analyze(
+            report_id=report.id, line_ids=[line_id],
+            analyzer=User(id="user-1", name="alice"),
+        )
+
+        results = service.list_deep_analyses(report.id)
+        assert len(results) == 2
+        assert results[0].iteration == 1
+        assert results[1].iteration == 2
+
+
+# ---- archive_report ----
+
+class TestArchiveReport:
+    """archive_report 改状态 + 写 audit_log。"""
+
+    async def test_archive_report_updates_status(
+        self, service: LogAnalysisService, repository: M2Repository,
+        session: Session,
+    ) -> None:
+        log_text = "2026-07-27 08:30:00,123 INFO system ready"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="user-1", name="alice"),
+        )
+        assert report.ingestion_status == STATUS_DRAFT
+
+        service.archive_report(report.id, archiver=User(id="user-1", name="alice"))
+
+        persisted = repository.get_analysis_report(report.id)
+        assert persisted is not None
+        assert persisted.ingestion_status == STATUS_ARCHIVED
+
+        # AC-15: 写 audit_log
+        from packages.m1.storage.models import AuditLogModel
+        audit_rows = session.query(AuditLogModel).filter_by(
+            action=ACTION_ARCHIVE_REPORT
+        ).all()
+        assert len(audit_rows) == 1
+
+    def test_archive_report_missing_raises(
+        self, service: LogAnalysisService
+    ) -> None:
+        """归档不存在的 report 抛 ValueError（service 层契约）。"""
+        with pytest.raises(ValueError, match="not found"):
+            service.archive_report("rpt-missing", archiver=User(id="u", name="n"))

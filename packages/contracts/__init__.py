@@ -7,7 +7,7 @@ from packages.contracts.analysis_report import (
 )
 from packages.contracts.audit import AuditLog
 from packages.contracts.deep_analysis import DeepAnalysisRecord
-from packages.contracts.log_entry import LogEntry
+from packages.contracts.log_entry import LogEntry, LogSource
 from packages.contracts.log_point import (
     CallContext,
     CaseRef,
@@ -27,6 +27,7 @@ __all__ = [
     "LLMHypothesis",
     "LogEntry",
     "LogPoint",
+    "LogSource",
     "RepoIngestLock",
     "TokenUsage",
 ]

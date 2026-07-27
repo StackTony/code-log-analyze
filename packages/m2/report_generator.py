@@ -78,8 +78,15 @@ class ReportGenerator:
         """AC-4: 截断超出时间窗的日志条目，返回截断后保留集 + 警告。
 
         无 timestamp 的条目（未识别格式）保留，不参与截断判断。
+        tz-tolerant：日志 timestamp 无 tzinfo 时按 UTC 处理（LogParser 默认行为）。
         """
-        window_start = window_end - timedelta(hours=window_hours)
+        # 统一 window_end 为 UTC aware
+        if window_end.tzinfo is None:
+            window_end_utc = window_end.replace(tzinfo=UTC)
+        else:
+            window_end_utc = window_end
+        window_start = window_end_utc - timedelta(hours=window_hours)
+
         kept: list[LogEntry] = []
         truncated = 0
 
@@ -87,7 +94,10 @@ class ReportGenerator:
             if e.timestamp is None:
                 kept.append(e)
                 continue
-            if window_start <= e.timestamp <= window_end:
+            ts = e.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if window_start <= ts <= window_end_utc:
                 kept.append(e)
             else:
                 truncated += 1
@@ -96,7 +106,7 @@ class ReportGenerator:
         if truncated > 0:
             warning = (
                 f"window truncation: {truncated} entries outside "
-                f"{window_hours}h window [{window_start.isoformat()}..{window_end.isoformat()}]"
+                f"{window_hours}h window [{window_start.isoformat()}..{window_end_utc.isoformat()}]"
             )
 
         return WindowTruncationResult(
@@ -153,6 +163,7 @@ class ReportGenerator:
         log_source: str,
         repo_id: str | None = None,
         window_end: datetime | None = None,
+        window_hours_override: int | None = None,
     ) -> AnalysisReport:
         """生成 Phase 1 全量分析报告。
 
@@ -161,6 +172,7 @@ class ReportGenerator:
             log_source: 日志来源标识（文件名 / M3 流标识）
             repo_id: 关联代码仓 id（无 LogPoint 匹配时为 None）
             window_end: 时间窗终点（默认 now）
+            window_hours_override: 覆盖配置默认 window_hours（spec API 允许覆盖）
 
         Returns:
             AnalysisReport dataclass（持久化由调用方负责）
@@ -173,10 +185,11 @@ class ReportGenerator:
                 f"split into batches or use Phase 2 deep_analyze for targeted analysis"
             )
 
-        # AC-4: 时间窗兜底（默认 24h）
+        # AC-4: 时间窗兜底（默认 24h，spec API 可覆盖）
         we = window_end or datetime.now(UTC)
+        wh = window_hours_override if window_hours_override is not None else self._config.window_hours
         trunc = self.truncate_to_window(
-            entries, window_end=we, window_hours=self._config.window_hours,
+            entries, window_end=we, window_hours=wh,
         )
         analyzed_entries = trunc.kept
 
