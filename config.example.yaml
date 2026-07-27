@@ -28,3 +28,11 @@ api:
   port: 8000  # 避开 CatCafe runtime 3003/3004（家规铁律方向修正）
   enable_auth: false  # F001.1 dev-only
   cors_origins: ["http://localhost:3003"]  # 允许 CatCafe 前端跨域访问（不占用 3003）
+m2:  # F002 离线 LLM 分析模块配置（spec §七）
+  phase1_model: "gpt-4o-mini"  # 便宜模型（AC-17 成本控制）
+  phase2_model: "gpt-4"  # 强模型（AC-7/8 深入分析）
+  phase1_window_hours: 24  # AC-4 时间窗兜底默认 24h
+  phase1_batch_size: 200  # AC-17 单次 LLM 调用日志行数上限
+  phase2_max_iterations: 5  # AC-11 累积迭代上限
+  cache_ttl_days: 30  # AC-6 LLM 调用缓存 TTL
+  enable_log_sanitizer: true  # AC-5 复用 M1 LogSanitizer

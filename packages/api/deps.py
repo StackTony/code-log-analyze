@@ -161,18 +161,18 @@ def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
         report_generator=ReportGenerator(
             llm_client=llm_phase1, cache=cache, sanitizer=sanitizer,
             config=Phase1Config(
-                model_name=_config.llm.model_name,
-                window_hours=24,
-                max_log_lines_per_call=200,
-                cache_ttl_seconds=86400,
+                model_name=_config.m2.phase1_model,
+                window_hours=_config.m2.phase1_window_hours,
+                max_log_lines_per_call=_config.m2.phase1_batch_size,
+                cache_ttl_seconds=_config.m2.cache_ttl_days * 86400,
             ),
         ),
         deep_analyzer=DeepAnalyzer(
             llm_client=llm_phase2, cache=cache, sanitizer=sanitizer,
             config=Phase2Config(
-                model_name=_config.llm.model_name,
-                max_iterations=5,
-                cache_ttl_seconds=86400,
+                model_name=_config.m2.phase2_model,
+                max_iterations=_config.m2.phase2_max_iterations,
+                cache_ttl_seconds=_config.m2.cache_ttl_days * 86400,
             ),
         ),
         hypothesis_writer=HypothesisWriter(m1_service=m1_service),
