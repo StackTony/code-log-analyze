@@ -82,3 +82,7 @@ tests/**/instance-*.log
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ===== Worktrees =====
+# 本地 git worktree 工作目录（家规：改代码必须开 worktree，但不跟踪到远端）
+.worktrees/
