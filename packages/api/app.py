@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import start_http_server
 
 from packages.api.error_handlers import register_exception_handlers
+from packages.api.routes.analysis import router as analysis_router
 from packages.api.routes.call_context import router as call_context_router
 from packages.api.routes.candidates import router as candidates_router
 from packages.api.routes.confirm import router as confirm_router
@@ -123,6 +124,7 @@ app.include_router(revoke_router)
 app.include_router(candidates_router)
 app.include_router(log_points_router)
 app.include_router(call_context_router)
+app.include_router(analysis_router)  # F002 M2
 
 # 统一异常处理器（spec §五 + AC-5）
 register_exception_handlers(app)

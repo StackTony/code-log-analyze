@@ -26,3 +26,23 @@ ACTION_QUERY = "query"
 ACTION_LIST_CANDIDATES = "list_candidates"
 ACTION_GET_CALL_CONTEXT = "get_call_context"
 ACTION_FORCE_RELEASE_LOCK = "force_release_lock"  # admin only
+# F002 M2 新增 action 常量
+ACTION_PHASE1_ANALYZE = "phase1_analyze"
+ACTION_PHASE2_DEEP_ANALYZE = "phase2_deep_analyze"
+ACTION_ARCHIVE_REPORT = "archive_report"
+
+# F002 M2 AnalysisReport.ingestion_status
+STATUS_DRAFT = "draft"
+STATUS_ARCHIVED = "archived"
+
+# F002 M2 Anomaly.severity
+SEVERITY_INFO = "info"
+SEVERITY_WARN = "warn"
+SEVERITY_ERROR = "error"
+SEVERITY_CRITICAL = "critical"
+
+# F002 M2 ErrorChain.relation
+RELATION_CAUSAL = "causal"
+RELATION_CORRELATION = "correlation"
+RELATION_PROPAGATION = "propagation"
+

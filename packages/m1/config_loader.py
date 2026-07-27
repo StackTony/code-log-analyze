@@ -68,6 +68,30 @@ class ApiConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class M2Config:
+    """F002 M2 — 离线 LLM 分析模块配置（spec §七）。
+
+    两阶段 LLM 调用的关键参数：
+      - phase1_model: 便宜模型（spec AC-17 成本控制）
+      - phase2_model: 强模型（spec AC-7/8 深入分析）
+      - phase1_window_hours: 时间窗兜底（spec AC-4 默认 24h）
+      - phase1_batch_size: Phase 1 单次 LLM 调用日志行数上限
+        （spec AC-17 max_log_lines_per_call）
+      - phase2_max_iterations: Phase 2 同 line 累积上下文上限
+        （spec AC-11 默认 5）
+      - cache_ttl_days: LLM 调用缓存 TTL（spec AC-6 默认 30 天）
+      - enable_log_sanitizer: 是否启用日志脱敏（spec AC-5 复用 M1 LogSanitizer）
+    """
+    phase1_model: str = "gpt-4o-mini"
+    phase2_model: str = "gpt-4"
+    phase1_window_hours: int = 24
+    phase1_batch_size: int = 200
+    phase2_max_iterations: int = 5
+    cache_ttl_days: int = 30
+    enable_log_sanitizer: bool = True
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     llm: LLMConfig
     storage: StorageConfig
@@ -75,6 +99,7 @@ class Config:
     sanitizer: SanitizerConfig
     metrics: MetricsConfig
     api: ApiConfig = dataclasses.field(default_factory=ApiConfig)  # F001.1 新增
+    m2: M2Config = dataclasses.field(default_factory=M2Config)  # F002 新增
 
 
 def _expand_env(value: Any) -> Any:
@@ -142,6 +167,9 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         enable_auth = enable_auth.lower() in ("true", "1", "yes")
     port = int(api_dict.get("port", 8000))  # 避开 CatCafe runtime 3003/3004（家规铁律方向修正）
 
+    # m2 段（缺失时用默认值 — spec §七）
+    m2_dict = expanded.get("m2", {})
+
     return Config(
         llm=LLMConfig(**expanded["llm"]),
         storage=StorageConfig(**expanded["storage"]),
@@ -153,5 +181,14 @@ def load_config(path: pathlib.Path | None = None) -> Config:
             port=port,
             enable_auth=enable_auth,
             cors_origins=cors,
+        ),
+        m2=M2Config(
+            phase1_model=m2_dict.get("phase1_model", "gpt-4o-mini"),
+            phase2_model=m2_dict.get("phase2_model", "gpt-4"),
+            phase1_window_hours=int(m2_dict.get("phase1_window_hours", 24)),
+            phase1_batch_size=int(m2_dict.get("phase1_batch_size", 200)),
+            phase2_max_iterations=int(m2_dict.get("phase2_max_iterations", 5)),
+            cache_ttl_days=int(m2_dict.get("cache_ttl_days", 30)),
+            enable_log_sanitizer=bool(m2_dict.get("enable_log_sanitizer", True)),
         ),
     )

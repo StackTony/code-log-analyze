@@ -6,7 +6,8 @@ import time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from packages.contracts.log_point import CallContext, LogPoint
+from packages.contracts.enums import STATUS_CONFIRMED
+from packages.contracts.log_point import CallContext, LLMHypothesis, LogPoint
 from packages.m1.audit_log import AuditLogger
 from packages.m1.config_loader import Config
 from packages.m1.gitnexus_client import GitNexusClient
@@ -22,6 +23,7 @@ from packages.m1.unit_d_candidate_staging import (
     CandidateFilter,
     CandidateStager,
     LogPointFilter,
+    _llm_hyp_to_json,
 )
 
 
@@ -121,3 +123,52 @@ class RepoLogGraphService:
             related_log_points=related,
             evidence_refs=[],
         )
+
+    # --- F002 §十：M2 Phase 2 假设回写入口（不动已有 6 个方法，AC-18 字节级稳定） ---
+    def update_log_point_hypothesis(
+        self,
+        log_point_ids: list[str],
+        hypothesis: LLMHypothesis,
+        writer: str,
+    ) -> int:
+        """F002 §十 AC-9：M2 Phase 2 deep_analyze 完成后回写 M1 LogPoint.llm_hypothesis。
+
+        只更新 confirmed 状态的 LogPoint，防止候选池数据被污染。
+        覆盖式写入（Phase 2 iteration 累积上下文时，后一次覆盖前一次）。
+
+        Args:
+            log_point_ids: 要回写的 LogPoint id 列表
+            hypothesis: LLM 假设对象
+            writer: 写入者标识（审计用）
+
+        Returns:
+            成功更新的行数（candidate 状态或不存在的 id 不计入）
+        """
+        if not log_point_ids:
+            return 0
+
+        # 仅 confirmed 状态的 LogPoint 才会被回写
+        rows = self._session.scalars(
+            select(LogPointModel).where(
+                LogPointModel.id.in_(log_point_ids),
+                LogPointModel.ingestion_status == STATUS_CONFIRMED,
+            )
+        ).all()
+        if not rows:
+            return 0
+
+        # 复用 _stager 的序列化逻辑（保持与 confirm_ingestion 路径一致）
+        json_str = _llm_hyp_to_json(hypothesis)
+        for row in rows:
+            row.llm_hypothesis_json = json_str
+            row.last_seen_at = hypothesis.generated_at  # 更新 last_seen_at
+        self._session.flush()
+
+        # 审计（复用 M1 AuditLogger，action 由调用方决定，这里只记字段级变更）
+        self._audit.log(
+            actor=writer,
+            action="update_log_point_hypothesis",
+            target_log_point_ids=log_point_ids,
+            extra={"updated_count": len(rows), "model_name": hypothesis.model_name},
+        )
+        return len(rows)

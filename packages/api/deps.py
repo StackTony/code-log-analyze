@@ -23,6 +23,7 @@ from packages.m1.log_sanitizer import SanitizerConfig as LogSanitizerConfig
 from packages.m1.metrics_emitter import MetricsEmitter
 from packages.m1.repo_log_graph_service import RepoLogGraphService
 from packages.m1.tree_sitter_parser import TreeSitterParser
+from packages.m2.metrics_emitter import M2MetricsEmitter
 
 if TYPE_CHECKING:
     pass
@@ -36,14 +37,23 @@ SessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=Fals
 
 # Module-level singleton emitter — constructed once per worker, reused across requests.
 _metrics_emitter: MetricsEmitter | None = None
+_m2_metrics_emitter: M2MetricsEmitter | None = None
 
 
 def _get_metrics_emitter() -> MetricsEmitter:
-    """Get or create the singleton MetricsEmitter instance."""
+    """Get or create the singleton M1 MetricsEmitter instance."""
     global _metrics_emitter
     if _metrics_emitter is None:
         _metrics_emitter = MetricsEmitter()
     return _metrics_emitter
+
+
+def _get_m2_metrics_emitter() -> M2MetricsEmitter:
+    """Get or create the singleton M2 MetricsEmitter instance（spec §八 + AC-14）。"""
+    global _m2_metrics_emitter
+    if _m2_metrics_emitter is None:
+        _m2_metrics_emitter = M2MetricsEmitter()
+    return _m2_metrics_emitter
 
 
 def get_session() -> Generator[Session, None, None]:
@@ -98,3 +108,91 @@ def get_service(session: Session = Depends(get_session)) -> Generator[RepoLogGra
         yield service
     finally:
         pass
+
+
+def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
+    session: Session = Depends(get_session),
+) -> Generator["LogAnalysisService", None, None]:
+    """FastAPI Depends — 构造 M2 LogAnalysisService（spec §五）。
+
+    生产环境复用 M1 service（m1_service 注入 get_service 产物）+ 真实 LLM client。
+    测试 / fixture 可直接 mock。
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from packages.m1.llm_hypothesis_generator import LLMClient
+    from packages.m2.deep_analyzer import DeepAnalyzer, Phase2Config
+    from packages.m2.hypothesis_writer import HypothesisWriter
+    from packages.m2.log_analysis_service import LogAnalysisService
+    from packages.m2.log_parser import LogParser
+    from packages.m2.log_point_matcher import LogPointMatcher, NullLogPointIndex
+    from packages.m2.report_generator import Phase1Config, ReportGenerator
+    from packages.m2.storage.repository import M2Repository
+    from packages.m2.storage_backed_log_point_index import (
+        LogPointIndexFactory,
+    )
+
+    # 复用 M1 service（含 m1_service.update_log_point_hypothesis / get_call_context）
+    m1_service_gen = get_service(session)
+    m1_service = next(m1_service_gen)
+
+    cache = MagicMock()
+    cache.get.return_value = None
+
+    sanitizer = LogSanitizer(
+        LogSanitizerConfig(
+            enabled=_config.sanitizer.enabled,
+            patterns=_config.sanitizer.patterns,
+            replacement=_config.sanitizer.replacement,
+        )
+    )
+
+    # LLM client 占位 — 生产注入真实 LLMClient 子类（review OQ-1）
+    llm_phase1 = AsyncMock(spec=LLMClient)
+    llm_phase2 = AsyncMock(spec=LLMClient)
+
+    # LogPoint 索引：按 repo_id 动态构造（review OQ-2 已落地真实 index）。
+    # service 内部每次 analyze_logs/deep_analyze 收到 repo_id 后调 factory
+    # 构造对应 repo 的 index（factory 内部 cache 避免重复扫表）。
+    index_factory = LogPointIndexFactory(session=session)
+
+    # Fallback matcher：无 repo_id 场景（text-only analyze_logs）使用。
+    # repo_id 非空时 service 内部会通过 index_factory 重建 matcher 覆盖此默认值。
+    fallback_matcher = LogPointMatcher(NullLogPointIndex())
+
+    service = LogAnalysisService(
+        session=session,
+        audit=AuditLogger(session),
+        repository=M2Repository(session),
+        log_parser=LogParser(),
+        log_point_matcher=fallback_matcher,
+        report_generator=ReportGenerator(
+            llm_client=llm_phase1, cache=cache, sanitizer=sanitizer,
+            config=Phase1Config(
+                model_name=_config.m2.phase1_model,
+                window_hours=_config.m2.phase1_window_hours,
+                max_log_lines_per_call=_config.m2.phase1_batch_size,
+                cache_ttl_seconds=_config.m2.cache_ttl_days * 86400,
+            ),
+        ),
+        deep_analyzer=DeepAnalyzer(
+            llm_client=llm_phase2, cache=cache, sanitizer=sanitizer,
+            config=Phase2Config(
+                model_name=_config.m2.phase2_model,
+                max_iterations=_config.m2.phase2_max_iterations,
+                cache_ttl_seconds=_config.m2.cache_ttl_days * 86400,
+            ),
+        ),
+        hypothesis_writer=HypothesisWriter(m1_service=m1_service),
+        m1_service=m1_service,
+        metrics=_get_m2_metrics_emitter(),
+        index_factory=index_factory,
+    )
+    try:
+        yield service
+    finally:
+        # 关闭 M1 service generator（如有 cleanup）
+        try:
+            next(m1_service_gen)
+        except StopIteration:
+            pass
