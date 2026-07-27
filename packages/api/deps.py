@@ -98,3 +98,81 @@ def get_service(session: Session = Depends(get_session)) -> Generator[RepoLogGra
         yield service
     finally:
         pass
+
+
+def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
+    session: Session = Depends(get_session),
+) -> Generator["LogAnalysisService", None, None]:
+    """FastAPI Depends — 构造 M2 LogAnalysisService（spec §五）。
+
+    生产环境复用 M1 service（m1_service 注入 get_service 产物）+ 真实 LLM client。
+    测试 / fixture 可直接 mock。
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from packages.m1.llm_hypothesis_generator import LLMClient
+    from packages.m2.deep_analyzer import DeepAnalyzer, Phase2Config
+    from packages.m2.hypothesis_writer import HypothesisWriter
+    from packages.m2.log_analysis_service import LogAnalysisService
+    from packages.m2.log_parser import LogParser
+    from packages.m2.log_point_matcher import LogPointIndex, LogPointMatcher
+    from packages.m2.report_generator import Phase1Config, ReportGenerator
+    from packages.m2.storage.repository import M2Repository
+
+    # 复用 M1 service（含 m1_service.update_log_point_hypothesis / get_call_context）
+    m1_service_gen = get_service(session)
+    m1_service = next(m1_service_gen)
+
+    cache = MagicMock()
+    cache.get.return_value = None
+
+    sanitizer = LogSanitizer(
+        LogSanitizerConfig(
+            enabled=_config.sanitizer.enabled,
+            patterns=_config.sanitizer.patterns,
+            replacement=_config.sanitizer.replacement,
+        )
+    )
+
+    # LLM client 占位 — 生产注入真实 LLMClient 子类
+    llm_phase1 = AsyncMock(spec=LLMClient)
+    llm_phase2 = AsyncMock(spec=LLMClient)
+
+    # LogPoint 索引占位 — 生产实现为 StorageBackedLogPointIndex（M1 主表查询）
+    log_point_index = MagicMock(spec=LogPointIndex)
+    log_point_index.lookup_by_template_hash.return_value = None
+
+    service = LogAnalysisService(
+        session=session,
+        audit=AuditLogger(session),
+        repository=M2Repository(session),
+        log_parser=LogParser(),
+        log_point_matcher=LogPointMatcher(log_point_index),
+        report_generator=ReportGenerator(
+            llm_client=llm_phase1, cache=cache, sanitizer=sanitizer,
+            config=Phase1Config(
+                model_name=_config.llm.model_name,
+                window_hours=24,
+                max_log_lines_per_call=200,
+                cache_ttl_seconds=86400,
+            ),
+        ),
+        deep_analyzer=DeepAnalyzer(
+            llm_client=llm_phase2, cache=cache, sanitizer=sanitizer,
+            config=Phase2Config(
+                model_name=_config.llm.model_name,
+                max_iterations=5,
+                cache_ttl_seconds=86400,
+            ),
+        ),
+        hypothesis_writer=HypothesisWriter(m1_service=m1_service),
+        m1_service=m1_service,
+    )
+    try:
+        yield service
+    finally:
+        # 关闭 M1 service generator（如有 cleanup）
+        try:
+            next(m1_service_gen)
+        except StopIteration:
+            pass
