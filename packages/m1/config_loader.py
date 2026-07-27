@@ -56,9 +56,13 @@ class MetricsConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ApiConfig:
-    """F001.1 — HTTP 服务层配置（spec §七）。"""
+    """F001.1 — HTTP 服务层配置（spec §七）。
+
+    端口避开 CatCafe runtime 自留地 3003/3004（家规铁律：外部项目禁占）。
+    选 8000 = FastAPI/uvicorn 社区默认，便于 dev 切换。
+    """
     host: str = "127.0.0.1"
-    port: int = 3004  # 家规铁律
+    port: int = 8000  # 避开 CatCafe runtime 3003/3004（家规铁律方向修正）
     enable_auth: bool = False  # F001.1 dev-only
     cors_origins: tuple[str, ...] = ("http://localhost:3003",)  # F003 前端
 
@@ -136,7 +140,7 @@ def load_config(path: pathlib.Path | None = None) -> Config:
     enable_auth = api_dict.get("enable_auth", False)
     if isinstance(enable_auth, str):
         enable_auth = enable_auth.lower() in ("true", "1", "yes")
-    port = int(api_dict.get("port", 3004))
+    port = int(api_dict.get("port", 8000))  # 避开 CatCafe runtime 3003/3004（家规铁律方向修正）
 
     return Config(
         llm=LLMConfig(**expanded["llm"]),

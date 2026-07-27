@@ -47,15 +47,16 @@ pytest
 # Lint
 ruff check .
 
-# 启动 API :3004（dev-only，自动启动 metrics :9100）
+# 启动 API :8000（dev-only，自动启动 metrics :9464）
+# 端口避开 CatCafe runtime 自留地 3003/3004/9100（家规铁律：外部项目禁占）
 python -m packages.api
 # 或
-uvicorn packages.api.app:app --port 3004 --reload
+uvicorn packages.api.app:app --port 8000 --reload
 
 # 浏览器访问
-# API 文档：http://localhost:3004/docs
-# Health：http://localhost:3004/health
-# Metrics：http://localhost:9100/metrics
+# API 文档：http://localhost:8000/docs
+# Health：http://localhost:8000/health
+# Metrics：http://localhost:9464/metrics
 ```
 
 ## 协作

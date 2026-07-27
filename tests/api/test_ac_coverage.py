@@ -11,7 +11,7 @@ AC_COVERAGE = {
     "AC-6": "tests/api/test_schema_validation.py",
     "AC-7": "tests/api/test_app.py::test_app_console_warning_unauthorized",
     "AC-8": "全量 pytest 跑通 — M1 77 测试无回归",
-    "AC-9": "端口 3004/9100 家规铁律 — spec 显式声明 + lifespan 启动",
+    "AC-9": "v1.1 修正 — 端口 8000/9464 避开 CatCafe runtime 自留地 3003/3004/9100（家规铁律方向纠正）",
     "AC-10": "tests/api/test_metrics.py::test_app_lifespan_starts_metrics_server",
     "AC-11": "tests/api/test_metrics.py::test_app_lifespan_starts_metrics_server（graceful）",
     "AC-12": "tests/api/test_mappers.py",

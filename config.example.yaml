@@ -22,9 +22,9 @@ sanitizer:
 metrics:
   enabled: true
   endpoint: /metrics
-  port: 9100
+  port: 9464  # 避开 CatCafe runtime 9100/3003/3004（家规铁律：外部项目禁占自留地）
 api:
   host: "127.0.0.1"
-  port: 3004  # 家规铁律：与 frontend 3003 / metrics 9100 分离
+  port: 8000  # 避开 CatCafe runtime 3003/3004（家规铁律方向修正）
   enable_auth: false  # F001.1 dev-only
-  cors_origins: ["http://localhost:3003"]  # F003 前端
+  cors_origins: ["http://localhost:3003"]  # 允许 CatCafe 前端跨域访问（不占用 3003）
