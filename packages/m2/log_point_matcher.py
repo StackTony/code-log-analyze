@@ -64,6 +64,16 @@ class LogPointIndex:
         raise NotImplementedError
 
 
+class NullLogPointIndex(LogPointIndex):
+    """空索引：所有 lookup 返回 None。
+
+    用途：无 repo_id 场景（text-only analyze_logs）的 fallback matcher。
+    """
+
+    def lookup_by_template_hash(self, template_hash: str) -> LogPoint | None:  # type: ignore[override]
+        return None
+
+
 @dataclass(frozen=True)
 class MatchResult:
     """单条 LogEntry 匹配结果。"""

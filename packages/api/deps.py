@@ -125,9 +125,12 @@ def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
     from packages.m2.hypothesis_writer import HypothesisWriter
     from packages.m2.log_analysis_service import LogAnalysisService
     from packages.m2.log_parser import LogParser
-    from packages.m2.log_point_matcher import LogPointIndex, LogPointMatcher
+    from packages.m2.log_point_matcher import LogPointMatcher, NullLogPointIndex
     from packages.m2.report_generator import Phase1Config, ReportGenerator
     from packages.m2.storage.repository import M2Repository
+    from packages.m2.storage_backed_log_point_index import (
+        LogPointIndexFactory,
+    )
 
     # 复用 M1 service（含 m1_service.update_log_point_hypothesis / get_call_context）
     m1_service_gen = get_service(session)
@@ -144,20 +147,25 @@ def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
         )
     )
 
-    # LLM client 占位 — 生产注入真实 LLMClient 子类
+    # LLM client 占位 — 生产注入真实 LLMClient 子类（review OQ-1）
     llm_phase1 = AsyncMock(spec=LLMClient)
     llm_phase2 = AsyncMock(spec=LLMClient)
 
-    # LogPoint 索引占位 — 生产实现为 StorageBackedLogPointIndex（M1 主表查询）
-    log_point_index = MagicMock(spec=LogPointIndex)
-    log_point_index.lookup_by_template_hash.return_value = None
+    # LogPoint 索引：按 repo_id 动态构造（review OQ-2 已落地真实 index）。
+    # service 内部每次 analyze_logs/deep_analyze 收到 repo_id 后调 factory
+    # 构造对应 repo 的 index（factory 内部 cache 避免重复扫表）。
+    index_factory = LogPointIndexFactory(session=session)
+
+    # Fallback matcher：无 repo_id 场景（text-only analyze_logs）使用。
+    # repo_id 非空时 service 内部会通过 index_factory 重建 matcher 覆盖此默认值。
+    fallback_matcher = LogPointMatcher(NullLogPointIndex())
 
     service = LogAnalysisService(
         session=session,
         audit=AuditLogger(session),
         repository=M2Repository(session),
         log_parser=LogParser(),
-        log_point_matcher=LogPointMatcher(log_point_index),
+        log_point_matcher=fallback_matcher,
         report_generator=ReportGenerator(
             llm_client=llm_phase1, cache=cache, sanitizer=sanitizer,
             config=Phase1Config(
@@ -178,6 +186,7 @@ def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
         hypothesis_writer=HypothesisWriter(m1_service=m1_service),
         m1_service=m1_service,
         metrics=_get_m2_metrics_emitter(),
+        index_factory=index_factory,
     )
     try:
         yield service

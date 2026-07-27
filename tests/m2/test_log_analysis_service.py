@@ -698,3 +698,109 @@ class TestMetricsIntegration:
             analyzer=User(id="u1", name="alice"),
         )
         assert report.system_summary == "system had errors"
+
+
+# ---- StorageBackedLogPointIndex 集成 ----
+
+class TestStorageBackedLogPointIndexIntegration:
+    """review OQ-2：用真实 StorageBackedLogPointIndex 取代 MagicMock。"""
+
+    async def test_analyze_logs_with_real_index_matches_confirmed_log_point(
+        self, session: Session, audit: AuditLogger, cache: MagicMock,
+        llm_client_phase1: AsyncMock, llm_client_phase2: AsyncMock,
+        sanitizer: LogSanitizer, repository: M2Repository,
+        m1_service: MagicMock,
+    ) -> None:
+        """真实 StorageBackedLogPointIndex 命中 confirmed LogPoint。
+
+        场景：M1 主表有 "User {uid} logged in"（confirmed），
+        M2 LogParser 解析出 "User 12345 logged in" → 模板
+        "User {var_0} logged in" → 归一化为 "User {x} logged in" → 命中。
+        """
+        from packages.m1.storage.models import LogPointModel
+        from packages.m2.storage_backed_log_point_index import (
+            StorageBackedLogPointIndex,
+        )
+
+        # 准备 M1 主表数据（confirmed 状态）
+        now = datetime.now(UTC)
+        session.add(LogPointModel(
+            id="lp-real-1",
+            repo_id="repo-real",
+            git_commit_sha="sha",
+            extractor_version="v1",
+            file_path="app/auth.py",
+            function_signature="def login()",
+            line_start=10,
+            line_end=10,
+            language="python",
+            log_level="INFO",
+            log_message_template="User {uid} logged in",
+            log_message_variables=["uid"],
+            framework_hint="logging",
+            confidence_score=0.95,
+            enclosing_class=None,
+            call_chain_to_entry=[],
+            enclosing_community=None,
+            evidence_refs_json="[]",
+            llm_hypothesis_json=None,
+            occurrence_count=1,
+            is_top_n=True,
+            ingestion_status="confirmed",
+            first_seen_at=now,
+            last_seen_at=now,
+        ))
+        session.commit()
+
+        # 用真实 index
+        real_index = StorageBackedLogPointIndex(
+            repo_id="repo-real", session=session,
+        )
+        service = LogAnalysisService(
+            session=session,
+            audit=audit,
+            repository=repository,
+            log_parser=LogParser(),
+            log_point_matcher=LogPointMatcher(real_index),
+            report_generator=ReportGenerator(
+                llm_client=llm_client_phase1, cache=cache, sanitizer=sanitizer,
+                config=Phase1Config(
+                    model_name="claude-haiku", window_hours=24,
+                    max_log_lines_per_call=200, cache_ttl_seconds=86400,
+                ),
+            ),
+            deep_analyzer=DeepAnalyzer(
+                llm_client=llm_client_phase2, cache=cache, sanitizer=sanitizer,
+                config=Phase2Config(
+                    model_name="claude-opus-4", max_iterations=5,
+                    cache_ttl_seconds=86400,
+                ),
+            ),
+            hypothesis_writer=HypothesisWriter(m1_service=m1_service),
+            m1_service=m1_service,
+        )
+
+        # 日志格式让 LogParser 提取模板 "User {var_0} logged in"
+        # （与 M1 的 "User {uid} logged in" 不同变量名但归一化后等价）
+        log_text = "2026-07-27 08:30:00,123 INFO User 12345 logged in"
+        report = await service.analyze_logs(
+            log_source=LogSource(text=log_text),
+            analyzer=User(id="u1", name="alice"),
+            repo_id="repo-real",
+        )
+        assert report.system_summary == "system had errors"
+
+        # 端到端 deep_analyze，验证 M1 回写被调用
+        entries = repository.list_log_entries(report.id)
+        line_id = entries[0].line_id
+        record = await service.deep_analyze(
+            report_id=report.id, line_ids=[line_id],
+            analyzer=User(id="u1", name="alice"),
+        )
+        # M1 update_log_point_hypothesis 应被调用（log_point_ids 含真实 LogPoint id）
+        m1_service.update_log_point_hypothesis.assert_called_once()
+        call_kwargs = m1_service.update_log_point_hypothesis.call_args.kwargs
+        assert call_kwargs["log_point_ids"] == ["lp-real-1"]
+        assert call_kwargs["writer"] == "m2-phase2-deep-analyzer"
+        # record.log_point_ids 也应含真实 LogPoint id
+        assert "lp-real-1" in record.log_point_ids

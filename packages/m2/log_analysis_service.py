@@ -49,6 +49,7 @@ from packages.m2.storage.repository import M2Repository
 
 if TYPE_CHECKING:
     from packages.m2.metrics_emitter import M2MetricsEmitter
+    from packages.m2.storage_backed_log_point_index import LogPointIndexFactory
 
 
 class LogAnalysisService:
@@ -66,7 +67,18 @@ class LogAnalysisService:
         hypothesis_writer: HypothesisWriter,
         m1_service: "M1ServiceProtocol",
         metrics: "M2MetricsEmitter | None" = None,
+        index_factory: "LogPointIndexFactory | None" = None,
     ) -> None:
+        """构造 LogAnalysisService。
+
+        Args:
+            index_factory: 可选 LogPointIndexFactory（review OQ-2 落地）。
+                注入后，当 analyze_logs/deep_analyze 入参 repo_id 非空时，
+                用 factory.get_index(repo_id) 构造 per-request matcher
+                覆盖默认 log_point_matcher（命中真实 M1 LogPoint）。
+                未注入 / repo_id 为 None 时 fallback 到 log_point_matcher
+                （测试场景：mock matcher 直注入）。
+        """
         self._session = session
         self._audit = audit
         self._repo = repository
@@ -77,6 +89,19 @@ class LogAnalysisService:
         self._writer = hypothesis_writer
         self._m1 = m1_service
         self._metrics = metrics
+        self._index_factory = index_factory
+
+    def _resolve_matcher(self, repo_id: str | None) -> LogPointMatcher:
+        """按 repo_id 选 matcher（review OQ-2）。
+
+        - repo_id 非空且 index_factory 注入 → per-request matcher
+          （从 M1 LogPointModel confirmed 主表建索引）
+        - 否则 → fallback self._matcher（测试默认注入或无 repo_id 场景）
+        """
+        if repo_id is not None and self._index_factory is not None:
+            index = self._index_factory.get_index(repo_id)
+            return LogPointMatcher(index)
+        return self._matcher
 
     # ---- Phase 1: analyze_logs ----
 
@@ -101,8 +126,10 @@ class LogAnalysisService:
         log_text = log_source.resolve_text()
         entries = self._parser.parse(log_text, source_file=log_source.file_path)
 
-        # 匹配 M1 LogPoint（即使 repo_id 为 None，matcher 也会跑，log_point 全 fallback None）
-        match_results = self._matcher.match(entries)
+        # 匹配 M1 LogPoint（review OQ-2：repo_id 非空 + index_factory 注入
+        # → 用真实 StorageBackedLogPointIndex 覆盖默认 fallback matcher）
+        matcher = self._resolve_matcher(repo_id)
+        match_results = matcher.match(entries)
 
         # AC-14: 更新 log_point_match_rate gauge
         if self._metrics is not None and entries:
@@ -187,7 +214,9 @@ class LogAnalysisService:
             selected_entries.append(entries_by_id[lid])
 
         # 3. 对每个 entry 通过 log_message_template 重新匹配 M1 LogPoint
-        match_results = self._matcher.match(selected_entries)
+        # review OQ-2：repo_id 非空 + index_factory 注入 → 真实 StorageBacked index
+        matcher = self._resolve_matcher(phase1_report.repo_id)
+        match_results = matcher.match(selected_entries)
         log_points = [r.log_point for r in match_results if r.log_point is not None]
 
         # 4. 对每个 LogPoint 调 M1 get_call_context
