@@ -196,3 +196,46 @@ def get_log_analysis_service(  # noqa: B008 — FastAPI Depends pattern
             next(m1_service_gen)
         except StopIteration:
             pass
+
+
+def get_online_log_scanner() -> "OnlineLogScanner":  # type: ignore[name-defined]
+    """构造 OnlineLogScanner（依赖注入 m2 service + m1 audit + storage）。
+
+    生产环境用 lifespan 管理 file_tailer task，dev 用 lazy 启动。
+    """
+    from packages.m2.log_parser import LogParser
+    from packages.m2.log_point_matcher import LogPointMatcher, NullLogPointIndex
+    from packages.m3.event_ingestor import EventIngestor
+    from packages.m3.metrics_emitter import M3MetricsEmitter
+    from packages.m3.online_log_scanner import OnlineLogScanner
+    from packages.m3.storage.repository import M3Repository
+    from packages.m3.trigger_evaluator import TriggerEvaluator
+
+    if SessionLocal is None:
+        raise RuntimeError("SessionLocal not initialized — postgres_dsn not configured")
+
+    session = SessionLocal()
+    try:
+        m2_service_gen = get_log_analysis_service(session)
+        m2_service = next(m2_service_gen)
+        audit = AuditLogger(session)
+        repo = M3Repository(session=session)
+        ingestor = EventIngestor(
+            repository=repo,
+            log_parser=LogParser(),
+            log_point_matcher=LogPointMatcher(NullLogPointIndex()),
+            audit=audit,
+        )
+        evaluator = TriggerEvaluator(repository=repo)
+        return OnlineLogScanner(
+            repository=repo,
+            ingestor=ingestor,
+            trigger_evaluator=evaluator,
+            m2_service=m2_service,
+            audit=audit,
+        )
+    finally:
+        # session 在 service 生命周期外仍有效（service 内部可能持有它）
+        # 暂不 close，留 lifespan 管理；dev 测试场景手动 close
+        pass
+

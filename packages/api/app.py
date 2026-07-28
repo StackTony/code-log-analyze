@@ -126,5 +126,16 @@ app.include_router(log_points_router)
 app.include_router(call_context_router)
 app.include_router(analysis_router)  # F002 M2
 
+# F003 M3 scan router（spec §六 8 端点）
+# 注：get_online_log_scanner 内部用 SessionLocal 单例，dev/test 用 mock 注入
+try:
+    from packages.api.deps import get_online_log_scanner
+    from packages.api.routes.scan import build_scan_router
+    _scan_scanner = get_online_log_scanner()
+    app.include_router(build_scan_router(_scan_scanner))
+except RuntimeError:
+    # dev 测试 / postgres 未配置时跳过 — 测试用 build_scan_router(mock) 直接注入
+    pass
+
 # 统一异常处理器（spec §五 + AC-5）
 register_exception_handlers(app)
