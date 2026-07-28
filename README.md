@@ -49,8 +49,6 @@ ruff check .
 
 # 启动 API :8000（dev-only，自动启动 metrics :9464）
 # 端口避开 CatCafe runtime 自留地 3003/3004/9100（家规铁律：外部项目禁占）
-python -m packages.api
-# 或
 uvicorn packages.api.app:app --port 8000 --reload
 
 # 浏览器访问

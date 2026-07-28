@@ -76,7 +76,7 @@ sanitizer:
 metrics:
   enabled: true
   endpoint: /metrics
-  port: 9100
+  port: 9464
 """,
         encoding="utf-8",
     )
@@ -97,7 +97,7 @@ llm: {api_key: k, model_name: m, endpoint: e}
 storage: {postgres_dsn: dsn, redis_port: 6399, redis_namespace: ns}
 extraction: {top_n_candidates: 50, include_print: false, ingest_timeout_minutes: 30, candidate_ttl_days: 30, extractor_version: "1.0.0"}
 sanitizer: {enabled: true, patterns: [api_key], replacement: "[REDACTED_{kind}]"}
-metrics: {enabled: true, endpoint: /metrics, port: 9100}
+metrics: {enabled: true, endpoint: /metrics, port: 9464}
 """,
         encoding="utf-8",
     )
