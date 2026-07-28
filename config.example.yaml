@@ -36,3 +36,11 @@ m2:  # F002 离线 LLM 分析模块配置（spec §七）
   phase2_max_iterations: 5  # AC-11 累积迭代上限
   cache_ttl_days: 30  # AC-6 LLM 调用缓存 TTL
   enable_log_sanitizer: true  # AC-5 复用 M1 LogSanitizer
+m3:  # F003 在线日志扫描配置（spec §七）
+  file_tail_poll_interval_seconds: 1.0  # v1 polling 模式
+  file_tail_use_inotify: false  # OQ-2 决策留 v2
+  time_window_event_count: 1000  # AC-5 累积事件数阈值
+  time_window_seconds: 300  # AC-5 时间窗 5min
+  anomaly_density_threshold: 0.30  # AC-6 异常密度阈值
+  event_ttl_days: 7  # LogStreamEvent 保留天数
+  pause_source_keep_events: true  # AC-9 pause 不丢事件

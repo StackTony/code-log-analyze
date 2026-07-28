@@ -92,6 +92,28 @@ class M2Config:
 
 
 @dataclasses.dataclass(frozen=True)
+class M3Config:
+    """F003 M3 — 在线日志扫描配置（spec §七）。
+
+    关键参数：
+      - file_tail_poll_interval_seconds: file_tail 轮询间隔（v1 polling 模式）
+      - file_tail_use_inotify: 是否启用 inotify（v1 默认 False，OQ-2 决策留 v2）
+      - time_window_event_count: 时间窗触发累积事件阈值
+      - time_window_seconds: 时间窗触发时间窗（5min）
+      - anomaly_density_threshold: 异常密度触发 error 占比阈值
+      - event_ttl_days: LogStreamEvent 保留天数
+      - pause_source_keep_events: pause 时是否保留累积事件（True）
+    """
+    file_tail_poll_interval_seconds: float = 1.0
+    file_tail_use_inotify: bool = False            # v1 默认 polling，inotify 留 v2（OQ-2）
+    time_window_event_count: int = 1000            # 时间窗触发：累积事件数
+    time_window_seconds: int = 300                 # 时间窗触发：时间窗（5min）
+    anomaly_density_threshold: float = 0.30        # 异常密度触发：error 占比阈值
+    event_ttl_days: int = 7                        # LogStreamEvent 保留天数
+    pause_source_keep_events: bool = True          # pause 时不丢累积事件
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     llm: LLMConfig
     storage: StorageConfig
@@ -100,6 +122,7 @@ class Config:
     metrics: MetricsConfig
     api: ApiConfig = dataclasses.field(default_factory=ApiConfig)  # F001.1 新增
     m2: M2Config = dataclasses.field(default_factory=M2Config)  # F002 新增
+    m3: "M3Config" = dataclasses.field(default_factory=M3Config)  # F003 新增
 
 
 def _expand_env(value: Any) -> Any:
@@ -170,6 +193,9 @@ def load_config(path: pathlib.Path | None = None) -> Config:
     # m2 段（缺失时用默认值 — spec §七）
     m2_dict = expanded.get("m2", {})
 
+    # m3 段（缺失时用默认值 — spec §七 F003）
+    m3_dict = expanded.get("m3", {})
+
     return Config(
         llm=LLMConfig(**expanded["llm"]),
         storage=StorageConfig(**expanded["storage"]),
@@ -190,5 +216,14 @@ def load_config(path: pathlib.Path | None = None) -> Config:
             phase2_max_iterations=int(m2_dict.get("phase2_max_iterations", 5)),
             cache_ttl_days=int(m2_dict.get("cache_ttl_days", 30)),
             enable_log_sanitizer=bool(m2_dict.get("enable_log_sanitizer", True)),
+        ),
+        m3=M3Config(
+            file_tail_poll_interval_seconds=float(m3_dict.get("file_tail_poll_interval_seconds", 1.0)),
+            file_tail_use_inotify=bool(m3_dict.get("file_tail_use_inotify", False)),
+            time_window_event_count=int(m3_dict.get("time_window_event_count", 1000)),
+            time_window_seconds=int(m3_dict.get("time_window_seconds", 300)),
+            anomaly_density_threshold=float(m3_dict.get("anomaly_density_threshold", 0.30)),
+            event_ttl_days=int(m3_dict.get("event_ttl_days", 7)),
+            pause_source_keep_events=bool(m3_dict.get("pause_source_keep_events", True)),
         ),
     )
