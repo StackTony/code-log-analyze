@@ -46,3 +46,25 @@ RELATION_CAUSAL = "causal"
 RELATION_CORRELATION = "correlation"
 RELATION_PROPAGATION = "propagation"
 
+# F003 M3 LogStreamSource.kind
+SOURCE_KIND_FILE_TAIL = "file_tail"
+SOURCE_KIND_HTTP_WEBHOOK = "http_webhook"
+
+# F003 M3 LogStreamSource.ingestion_status
+STATUS_ACTIVE = "active"
+STATUS_PAUSED = "paused"
+STATUS_STOPPED = "stopped"
+
+# F003 M3 ScanTrigger.trigger_kind
+TRIGGER_TIME_WINDOW = "time_window"
+TRIGGER_ANOMALY_DENSITY = "anomaly_density"
+TRIGGER_MANUAL = "manual"
+
+# AuditLog action（M3 写操作时统一引用，避免字符串硬编码不一致）
+ACTION_M3_REGISTER_SOURCE = "m3_register_source"
+ACTION_M3_PAUSE_SOURCE = "m3_pause_source"
+ACTION_M3_RESUME_SOURCE = "m3_resume_source"
+ACTION_M3_INGEST_EVENT = "m3_ingest_event"
+ACTION_M3_TRIGGER_ANALYZE = "m3_trigger_analyze"
+ACTION_M3_SCAN_NOW = "m3_scan_now"
+
