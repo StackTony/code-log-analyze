@@ -2,9 +2,13 @@
 
 依赖注入 M2 LogAnalysisService（M2ServiceProtocol）+ M3 内部组件。
 不直接 import M2 service，避免循环依赖。
+
+注：M2 LogAnalysisService.analyze_logs 是 async def。M3 scan_now 是同步
+路由（FastAPI sync handler），用 asyncio.run 桥接协程到同步返回。
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -138,12 +142,27 @@ class OnlineLogScanner:
         log_text = "\n".join(e.raw_text for e in events)
         log_source = LogSource(text=log_text)
 
-        # 调 M2
-        report = self._m2.analyze_logs(
+        # 调 M2（M2 LogAnalysisService.analyze_logs 是 async，用 asyncio.run 桥接）
+        coro = self._m2.analyze_logs(
             log_source=log_source,
             analyzer=user,
             repo_id=src.repo_id,
         )
+        try:
+            # 如果是协程（生产路径，注入真实 M2 service），用 asyncio.run 同步执行
+            import inspect
+            if inspect.iscoroutine(coro):
+                report = asyncio.run(coro)
+            else:
+                # 测试 mock 直接返回对象（同步路径）
+                report = coro
+        except RuntimeError as e:
+            # 已在 event loop 内（如 pytest-asyncio），用 ensure_future + sync wait
+            if "asyncio.run() cannot be called" in str(e):
+                loop = asyncio.get_event_loop()
+                report = loop.run_until_complete(coro)
+            else:
+                raise
 
         # 写 ScanTrigger
         trigger = ScanTrigger(
